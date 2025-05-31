@@ -1,3 +1,5 @@
+# Chapter 14: HTTP Caching
+
 ### I. Core Concepts: Why Cache?
 
 - **Goal:** Improve scalability, reduce server load, and decrease response times.
