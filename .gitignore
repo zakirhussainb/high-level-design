@@ -1,0 +1,5 @@
+# Ignore all files in the specific directory
+high-level-design/books/understanding-distributed-systems/III-Scalability/*
+
+# But un-ignore (re-include) .pdf files in that directory
+!high-level-design/books/understanding-distributed-systems/III-Scalability/*.pdf
