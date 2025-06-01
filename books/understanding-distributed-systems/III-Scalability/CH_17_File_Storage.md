@@ -57,7 +57,7 @@ Understanding the internal workings of distributed file stores is beneficial due
 ### D. Storage Cluster Architecture (Three Layers)
 
 ::: {.centerfigure}
-![A high-level view of Azure Storage's architecture (Figure 17.1)](17_1.png){width=60%}
+![A high-level view of Azure Storage's architecture](17_1.png){width=50%}
 :::
 
 A storage cluster in AS is architecturally composed of three distinct layers:
@@ -68,9 +68,11 @@ A storage cluster in AS is architecturally composed of three distinct layers:
     - Internally, a stream is a sequence of **extents**. The _extent_ is the fundamental unit of replication.
     - Writes to extents are replicated _synchronously_ using **chain replication**.
     - **Stream Manager (Control Plane):**
+
       ::: {.centerfigure}
-      ![The stream layer uses chain replication to replicate extents across storage servers (Figure 17.2)](17_2.png){width=60%}
+      ![The stream layer uses chain replication to replicate extents across storage servers](17_2.png){width=70%}
       :::
+
       - Responsible for assigning an extent to a specific _chain of storage servers_ within the cluster.
       - When allocating a new extent, it provides the client (partition layer) with the list of storage servers in the chain for that extent.
       - The client caches this information and uses it to send future writes directly to the _primary server_ in the chain.
@@ -80,13 +82,16 @@ A storage cluster in AS is architecturally composed of three distinct layers:
 
     - This layer translates _high-level file operations_ (like read, write, delete on a file) into _low-level stream operations_ (on extents).
     - **Partition Manager (Control Plane):**
+
       ::: {.centerfigure}
-      ![The partition manager range-partitions files across partition servers and rebalances the partitions when necessary (Figure 17.3)](17_3.png){width=60%}
+      ![The partition manager range-partitions files across partition servers and rebalances the partitions when necessary](17_3.png){width=70%}
       :::
+
       - Manages a _large distributed index_ of all files stored in the cluster.
       - Each index entry contains metadata (e.g., account and file name) and a pointer to the actual data in the stream service (which includes a list of extents, plus offset and length within those extents).
       - It _range-partitions_ this index and maps each index partition to a specific **partition server**.
       - Responsible for _load-balancing_ these index partitions across partition servers, including _splitting_ partitions when they become too "hot" (frequently accessed) and _merging_ "cold" ones.
+
     - This layer also _asynchronously replicates accounts across different clusters_ in the background. This is used for migrating accounts for load balancing and for disaster recovery purposes.
 
 3.  **Front-End Layer:**
