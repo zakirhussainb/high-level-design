@@ -53,7 +53,7 @@ The leader ensures all followers have the same state by replicating its **log**.
   3.  The **election term** of the leader that created the entry.
 
 ::: {.centerfigure}
-![The leader's log is replicated to its followers.](figure_10.1.png){width=80%}
+![The leader's log is replicated to its followers.](10_1.png){width=80%}
 :::
 
 ### The Commit Process
@@ -86,7 +86,7 @@ This is the strongest and most intuitive consistency model.
 - **Tradeoff**: This model provides the best guarantees but suffers from higher latency, especially for reads. To serve a read, the leader must first contact a majority of followers to confirm it is still the leader, adding a round-trip delay.
 
 ::: {.centerfigure}
-![The side-effects of a strongly consistent operation are visible to all observers once it completes.](figure_10.4.png){width=60%}
+![The side-effects of a strongly consistent operation are visible to all observers once it completes.](10_4.png){width=60%}
 :::
 
 ### Sequential Consistency
@@ -98,7 +98,7 @@ A slightly relaxed model that improves read performance.
 - **Analogy**: A producer-consumer queue. The consumer sees items in the same order the producer added them, but it is always lagging behind.
 
 ::: {.centerfigure}
-![Although followers have a different view of the system's state, they process updates in the same order.](figure_10.5.png){width=80%}
+![Although followers have a different view of the system's state, they process updates in the same order.](10_5.png){width=80%}
 :::
 
 ### Eventual Consistency
@@ -133,7 +133,7 @@ Chain replication is a protocol that provides strong consistency with a differen
 - **Fault Tolerance**: Managed by a separate, fault-tolerant **control plane** (which itself might use Raft). The control plane's job is to monitor the chain and reconfigure it when a node fails.
 
 ::: {.centerfigure}
-![Writes propagate through all processes in the chain, while reads are served exclusively by the tail.](figure_10.6.png){width=70%}
+![Writes propagate through all processes in the chain, while reads are served exclusively by the tail.](10_6.png){width=70%}
 :::
 
 ### Data Flow
@@ -150,5 +150,5 @@ Chain replication is a protocol that provides strong consistency with a differen
 - **Read Optimization**: To further scale reads, all replicas can be allowed to serve them. To maintain strong consistency, if a replica has a "dirty" (uncommitted) version of an object, it must first contact the tail to get the latest committed version before responding.
 
 ::: {.centerfigure}
-![A dirty read can be served by any replica with an additional request to the tail to guarantee strong consistency.](figure_10.7.png){width=70%}
+![A dirty read can be served by any replica with an additional request to the tail to guarantee strong consistency.](10_7.png){width=70%}
 :::

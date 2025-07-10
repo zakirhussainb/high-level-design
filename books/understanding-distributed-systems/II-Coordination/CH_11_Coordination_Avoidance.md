@@ -15,103 +15,112 @@ header-includes: |
   \AtBeginEnvironment{longtable}{\footnotesize}
 ---
 
-# Chapter 10: Replication
+# Chapter 11: Coordination Avoidance
 
-Data replication is a fundamental technique in distributed systems used for two primary reasons:
+## The Problem with Coordination
 
-- **To increase availability**: If data is stored on a single process that fails, the data becomes inaccessible. With replication, clients can switch to a working copy.
-- **To increase scalability and performance**: The more replicas there are, the more clients can access the data concurrently.
+Traditional state machine replication requires a **fault-tolerant total order broadcast**, which ensures that every replica receives the same updates in the same order. This is difficult to implement because it requires **consensus**.
 
-The main challenge of replication is keeping all replicas consistent with one another, especially in the face of failures. This chapter explores replication primarily through the lens of **state machine replication**, using the Raft algorithm as an example.
+This need for a total order creates two major issues:
 
-The core idea of **state machine replication** is that if multiple processes start in the same initial state and execute the exact same sequence of operations, they will all end up in the same final state. In this model, a leader process broadcasts operations to follower processes (replicas).
+- **Scalability Bottleneck**: Updates must be processed sequentially by a single process (e.g., the leader in Raft), which limits throughput.
+- **Lack of Availability**: Total order broadcast is not available during network partitions, as dictated by the CAP theorem.
 
-## 10.1 Raft State Machine Replication
+This chapter explores replication strategies that avoid coordination by not requiring a total order.
 
-In the Raft protocol, a leader is first elected. This leader is the only process allowed to change the system's state. It does so by maintaining a log of operations, which it then replicates to its followers.
+## Broadcast Protocols
 
-- A **log** is an ordered list of entries. Each entry contains:
-  - The operation to be applied (which must be deterministic).
-  - The index of the entry in the log.
-  - The leader's election term.
+Broadcast protocols are used to deliver a message to a group of processes. They are built on top of unicast (point-to-point) protocols like TCP.
 
-::: {.centerfigure}
-![The leader's log is replicated to its followers.](10_1.png){width=80%}
-:::
-
-### The Write Process in Raft
-
-1.  A client sends a write request to the leader. The leader appends a new entry for the operation to its local log. The operation is **not yet applied** to the state.
-2.  The leader sends an `AppendEntries` request to each follower containing the new entry. This request also serves as a periodic heartbeat.
-3.  Upon receiving the request, each follower appends the entry to its own log and sends an acknowledgment back to the leader.
-4.  When the leader receives successful acknowledgments from a **majority** of followers (a quorum), it considers the entry **committed** and applies the operation to its local state machine.
-5.  The leader informs followers of the latest committed index in future `AppendEntries` requests. Followers then apply the committed entries to their local state.
-
-### Fault Tolerance in Raft
-
-- **Quorum-Based Progress**: Because the leader only needs to wait for a majority of followers, the system can tolerate failures. A system with `2f + 1` followers can tolerate up to `f` failures.
-- **Leader Failure**: If the leader fails, a new leader is elected. To prevent an out-of-date follower from becoming leader, a candidate cannot win an election unless its log contains all previously committed entries.
-- **Follower Failure**: If a follower is down or a message is lost, the leader will retry sending the `AppendEntries` request indefinitely until a majority have appended it. When the follower comes back online, the leader will find the point where their logs agree and send all necessary entries to bring the follower's log up-to-date.
-
-## 10.2 Consensus
-
-State machine replication is a practical application of **consensus**, a fundamental problem in distributed systems where a group of processes must agree on a single value. The agreement must satisfy three properties:
-
-1.  Every non-faulty process eventually agrees on a value.
-2.  The final decision is the same for every non-faulty process.
-3.  The agreed-upon value was proposed by one of the processes.
-
-You will likely never need to implement consensus from scratch, as off-the-shelf solutions like **etcd** and **ZooKeeper** are widely used for coordination tasks like leader election.
-
-## 10.3 Consistency Models
-
-A **consistency model** formally defines the possible views that clients (observers) can have of a replicated system's state. There is a fundamental trade-off between consistency, performance, and availability.
-
-### Strong Consistency (Linearizability)
-
-- This is the strongest consistency guarantee a system can provide for single-object requests. It makes the replicated system appear as if there is only a single copy of the data.
-- Every operation appears to take place atomically at a specific point in time between its invocation and its completion. Its side-effects are visible to all observers once it completes.
-- This can be achieved if all clients send their reads and writes exclusively to the leader. However, for a leader to serve a read, it must first contact a majority of followers to confirm it is still the leader, which adds significant latency.
+- **Best-Effort Broadcast**: The sender sends the message to all processes one by one. If the sender crashes midway, some processes will never receive the message.
+- **Reliable Broadcast**: Guarantees that the message is delivered to all non-faulty processes, even if the sender crashes.
+  - **_Eager Reliable Broadcast_**: Upon receiving a message for the first time, each process re-broadcasts it to the entire group. This is very expensive, requiring $N^2$ messages for a group of N processes.
+  - **_Gossip Broadcast_**: A probabilistic protocol where processes retransmit messages to a random subset of their peers, similar to how rumors spread. While not a 100% guarantee, it's highly effective for broadcasting to large groups where deterministic protocols wouldn't scale.
 
 ::: {.centerfigure}
-![The side-effects of a strongly consistent operation are visible to all observers once it completes.](10_4.png){width=70%}
+![Gossip broadcast where processes retransmit to a random subset of peers.](11_3.png){width=80%}
 :::
 
-### Sequential Consistency
+- **Total Order Broadcast**: The strongest form of broadcast. It is a reliable broadcast that also guarantees messages are delivered in the **same order** to all processes. This requires consensus.
 
-- This model guarantees that operations occur in the same order for all observers, but it provides **no real-time guarantee** about when an operation's side-effects become visible.
-- This can be achieved by allowing followers to serve reads. Different clients reading from different followers might see the state at different times, but they will all see the state evolve in the same sequence.
+## Conflict-free Replicated Data Types (CRDTs)
+
+If we use a broadcast protocol that _doesn't_ guarantee total order, any replica can accept writes. This improves performance and availability but means replicas will receive updates in different orders and their states will diverge. To be useful, this divergence must be temporary, and replicas must eventually converge to the same state. This is the core idea of **eventual consistency**.
+
+A stronger variation is **Strong Eventual Consistency**, which uses a deterministic method to resolve conflicts _without_ needing consensus. This allows for systems that are simultaneously available, partition-tolerant, and (strongly eventually) consistent.
+
+This is achieved using data types that have specific mathematical properties:
+
+- The set of possible states for an object forms a **semilattice**.
+- There is a **merge** operation that is _associative_, _commutative_, and _idempotent_.
+
+Data types with these properties are called **Conflict-free Replicated Data Types (CRDTs)**. They are designed to converge automatically.
+
+### Common CRDT Implementations
+
+- **Last-Writer-Wins (LWW) Register**: Each update is associated with a timestamp. When merging two versions of an object, the one with the greater timestamp "wins," and the other is discarded. This is simple but can arbitrarily discard a concurrent update.
 
 ::: {.centerfigure}
-![Although followers have a different view of the system's state, they process updates in the same order.](10_5.png){width=70%}
+![In a Last-Writer-Wins register, the update with the greater timestamp is kept during a merge.](11_5.png){width=50%}
 :::
 
-### Eventual Consistency
-
-- This is the weakest consistency model. It only guarantees that if no new writes occur, all replicas will **eventually** converge to the same state.
-- This occurs when clients can read from any follower. A client might read from one follower, then another that is lagging behind, and see the state appear to go backward in time.
-
-### The CAP and PACELC Theorems
-
-- **The CAP Theorem**: States that a distributed system can only provide two of the following three guarantees: Strong **C**onsistency, **A**vailability, and **P**artition tolerance. Since network partitions are a given, the real choice is between strong consistency and availability.
-- **The PACELEÇC Theorem**: Extends CAP by stating that in case of a network **P**artition, a system must choose between **A**vailability and **C**onsistency; **E**lse (during normal operation), it must choose between **L**atency and **C**onsistency.
-
-## 10.4 Chain Replication
-
-Chain replication is a replication protocol that arranges processes in a linear chain, with a **head** and a **tail**.
-
-- **Write Path**: Writes are sent exclusively to the **head**. The update is then passed down the chain from one process to the next until it reaches the **tail**.
-- **Read Path**: Reads are served exclusively by the **tail**.
-- **Fault Tolerance**: Handled by a dedicated **control plane** (which itself must be fault-tolerant, e.g., using Raft) that monitors the chain and reconfigures it if a node fails. This separates the data path from the control plane.
+- **Multi-Value (MV) Register**: Instead of discarding concurrent updates, the MV register keeps all of them. It uses vector clocks to detect which updates are concurrent. The application or client is then responsible for resolving the conflict by choosing a value or merging them.
 
 ::: {.centerfigure}
-![Writes propagate through all processes in the chain, while reads are served exclusively by the tail.](10_6.png){width=70%}
+![A Multi-Value register keeps all concurrent updates, leaving resolution to the client.](11_6.png){width=50%}
 :::
 
-### Performance and Trade-offs
+CRDTs are composable, meaning you can build complex structures like a key-value store using a dictionary of CRDT registers.
 
-- **Pros**:
-  - **High Read Throughput**: Reads are served immediately from the tail without any coordination, leading to lower latency.
-- **Cons**:
-  - **High Write Latency**: A write must travel through the entire chain before it is committed, so a single slow replica can slow down all writes.
-  - **Lower Write Availability**: If any process in the chain is unavailable, writes cannot be committed until the control plane detects the failure and reconfigures the chain. Raft, in contrast, can commit writes as long as a majority of processes are available.
+## Dynamo-style Data Stores
+
+Dynamo is a famous design for a highly available, eventually consistent key-value store. Systems like Cassandra and Riak KV are inspired by it.
+
+### Quorum Replication
+
+- **Operation**: Any replica in the system can accept read and write requests.
+- **Write Quorum (W)**: When a client writes, it sends the request to N replicas but only waits for acknowledgements from a subset **W**.
+- **Read Quorum (R)**: When a client reads, it sends the request to N replicas but waits for responses from a subset **R** and uses the most recent value.
+- **Consistency**: If **`W + R > N`**, the read and write quorums are guaranteed to overlap. This ensures that a read will see at least one replica with the latest committed write.
+
+::: {.centerfigure}
+![When W + R > N, the write and read quorums must intersect.](11_7.png){width=40%}
+:::
+
+### Anti-Entropy Mechanisms
+
+To ensure that all replicas eventually receive all updates (even those missed during the initial write), Dynamo-style systems use anti-entropy (or healing) mechanisms:
+
+- **Read Repair**: When a client reads from R replicas, it might detect some have stale data. The client then issues a write request to update those out-of-sync replicas with the newer value.
+- **Replica Synchronization**: A continuous background process where replicas periodically communicate (often using a gossip protocol) to compare their data (e.g., using Merkle trees) and repair any inconsistencies.
+
+## The CALM Theorem
+
+The CALM theorem provides a formal way to determine if an application can be implemented without coordination (like consensus).
+
+- **Theorem**: A program has a consistent, coordination-free distributed implementation _if and only if_ it is **monotonic**.
+- **Monotonicity**: A program is monotonic if new inputs only add to or refine the result, without ever invalidating or retracting a previous output.
+  - _Monotonic Example_: Adding items to a shopping cart.
+  - _Non-Monotonic Example_: A bank transfer, which involves both a decrement (non-monotonic) and an increment. Standard variable assignment is also non-monotonic as it overwrites the previous value.
+- CRDTs are, by design, monotonic.
+
+## Causal Consistency
+
+Causal consistency is a model that is stronger than eventual consistency but weaker than strong consistency.
+
+- **Problem Solved**: It preserves the "happened-before" relationship between operations. In an eventually consistent system, you might see a comment on a photo before you see the photo itself. Causal consistency prevents this.
+- **Guarantee**: If operation A _causes_ operation B, all processes are guaranteed to see A before B. Operations that are not causally related (i.e., are concurrent) can be observed in different orders by different processes.
+- **Significance**: Causal consistency is the **strongest** consistency model that can be achieved while also guaranteeing availability and partition tolerance.
+
+### Implementation (based on COPS)
+
+Causal consistency can be implemented by tracking dependencies.
+
+1.  When a client reads a key, it notes the version (e.g., a logical timestamp) of the data it received. This version becomes a **dependency**.
+2.  When the client later writes a new value, it sends its list of dependencies along with the write request to its local replica.
+3.  The local replica applies the write and broadcasts it asynchronously to other replicas.
+4.  When a remote replica receives the broadcasted write, it **waits** until it has seen and applied all the write's dependencies before applying the write itself. This ensures the causal order is respected across the system.
+
+::: {.centerfigure}
+![A causally consistent key-value store, where replicas wait for dependencies to be met before applying an update.](11_8.png){width=70%}
+:::
