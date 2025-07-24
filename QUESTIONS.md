@@ -85,7 +85,72 @@ The Metadata Service, which maps billions or trillions of fingerprints to storag
 
 * **Bloom Filters**: Before hitting the main index, the client can check against a **Bloom filter**. This is a probabilistic data structure that can quickly tell you if an item is *definitely not* in a set. Clients can download this filter periodically. If the filter says a chunk is new, the client can skip asking the main index and just upload it. This drastically reduces the query load on the index for new data.
 
----
-
 
 * **Sharded Key-Value Store**: The primary index must be a distributed database **sharded by the fingerprint hash**. A Distributed Hash Table (DHT) or a sharded NoSQL database (like DynamoDB or Cassandra) is a perfect fit. Consistent hashing is used to map a fingerprint to the specific shard (server) that holds its information, ensuring the load is evenly distributed.
+
+---
+
+### 2: How would you design an idempotent feature-flag system that keeps your UI fast without hammering the backend?
+
+### Approach:
+
+Of course. This is a great question that tests practical system design thinking. Here’s a breakdown of how to build a robust and performant feature-flag system.
+
+The main goal is to deliver the correct flags to the UI instantly without making the user wait or overwhelming the backend with requests. The system must also be idempotent, meaning repeated requests for flags don't change the outcome or cause side effects.
+
+#### Core Architecture & Workflow 🏗️
+
+Here's how the system works from end to end:
+
+* **Backend Flag Service**: This is the source of truth where developers configure flags (e.g., `isNewDashboardEnabled: true`, `searchAlgorithm: 'beta'`) and set targeting rules (e.g., "enable for 50% of users" or "only for users in Canada").
+
+* **Client-Side SDK**: This is a small library integrated into your frontend application (web or mobile). It's responsible for all flag-related logic on the client.
+
+* **Initialization & Fetching**:
+    * **On App Load**: The SDK makes a single, asynchronous API call to the backend to fetch all relevant flags for the user.
+    * **Graceful Fallback**: If this API call fails (e.g., network error), the SDK falls back to the last known set of flags stored in the cache. If it's the very first time and the cache is empty, it uses a default set of flags bundled with the application code. This prevents the UI from breaking.
+
+* **Smart Caching**:
+    * **Storage**: The fetched flags are stored in `localStorage` (for web) to persist them across page reloads and browser sessions.
+    * **In-Memory Mirror**: For instant access during the current session, the flags from `localStorage` are loaded into a fast in-memory object (like a JavaScript `Map`). When your application code asks for a flag's value, it's read directly from memory in microseconds.
+
+* **Cache Invalidation**:
+    * **Time-To-Live (TTL)**: The flags fetched from the backend come with a TTL (e.g., 5 minutes). The SDK will automatically refetch flags in the background once the TTL expires.
+    * **Explicit Events**: The cache is cleared and refetched on key events like user logout (since the next user will have different flags) or when notified of a new deployment.
+
+#### The Big Problem: Handling Stale Cache 😅
+
+This is the critical trade-off question. What if the cache is stale and the UI has an outdated flag, but the user tries to perform a critical action?
+
+**Scenario**: A developer quickly disables a buggy payment feature using a flag `isNewGatewayEnabled`. The backend now has this flag set to `false`. However, a user's browser tab has a cached value of `true`. The user clicks "Pay".
+
+**The Wrong Way**: The UI blindly uses its stale `true` flag and sends the payment request to the new, buggy gateway endpoint. The backend might process it incorrectly or fail.
+
+**The Right Way: Server-Side Verification**
+For critical operations, the backend must have the final say. The client should send its current flag state along with the request.
+
+1.  When the SDK fetches flags, it also gets a **version hash** (e.g., `flagsVersion: "v7_abc123"`).
+2.  When the user clicks "Pay," the client-side API call includes this version hash in the request headers:
+    ```
+    POST /api/process-payment
+    Headers: { "X-Flags-Version": "v7_abc123" }
+    ```
+3.  The backend API handler for `/process-payment` first checks this version. It knows the current version is `v8_def456`.
+4.  Since the versions don't match, the backend rejects the request with a specific error, like `409 Conflict` and a message `{"error": "flags_outdated"}`.
+5.  The client-side SDK catches this specific error, forces an immediate refetch of the flags, and can then prompt the user to retry the action.
+
+This pattern ensures that critical actions are always executed against the server's source of truth, gracefully handling any cache staleness.
+
+#### What Else Could Go Wrong? 🤔
+
+Even with a solid design, you can run into practical issues:
+
+* **"Flash of Incorrect Content" (FOIC)**: On the initial load, the UI might render with default flags for a split second before the fresh flags arrive from the API, causing a visual flicker.
+    * **Solution**: Display a loading state or skeleton UI for the components affected by flags until the initial fetch is complete. This is the most common and effective solution.
+
+* **Changing User Context**: What if flags depend on user attributes that change mid-session (e.g., a user upgrades their subscription)?
+    * **Solution**: The application needs to notify the feature-flag SDK of this context change. The SDK would then trigger a refetch with the new user attributes to get the correct set of flags.
+        `featureFlagSDK.updateContext({plan: 'premium'})`
+
+* **Performance on Load**: The initial flag fetch is in the critical path of your application startup.
+    * **Solution**: Use a **Content Delivery Network (CDN)** to serve the flag delivery API. This caches flag configurations at edge locations globally, ensuring low latency for all users.
