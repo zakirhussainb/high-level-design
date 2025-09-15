@@ -154,3 +154,95 @@ Even with a solid design, you can run into practical issues:
 
 * **Performance on Load**: The initial flag fetch is in the critical path of your application startup.
     * **Solution**: Use a **Content Delivery Network (CDN)** to serve the flag delivery API. This caches flag configurations at edge locations globally, ensuring low latency for all users.
+
+# System Design Interview Questions: Software Testing
+
+Here are some interview questions and answers based on the provided document, focusing on testing strategies for large-scale systems.
+
+---
+
+## Question 1: Testing a Critical Microservice
+
+**Scenario:** You are tasked with designing the testing strategy for a new, critical microservice in a large e-commerce platform. This service is responsible for processing orders. It interacts with a central database, an internal inventory service, and a third-party billing API.
+
+**Question:** How would you approach testing this service? Describe the different types of tests you would implement, their proportions, and the rationale behind your strategy.
+
+### Solution
+
+My testing strategy would be based on the **Test Pyramid** model to balance confidence, speed, and cost. The goal is to have a large number of fast, reliable tests at the base and a small number of slower, broader tests at the top.
+
+
+
+* **Unit Tests (Largest Quantity):** I would start with a comprehensive suite of unit tests.
+    * **Scope:** These tests would validate small, individual parts of the codebase, like a single class or function, in isolation. For example, testing the logic for order validation or price calculation.
+    * **Implementation:** They would focus on testing the public interfaces of the code, verifying behavior and state changes. These tests would be **small**, running in a single process without any blocking calls or I/O, making them fast and deterministic.
+
+* **Integration Tests (Medium Quantity):** Next, I would implement integration tests to verify the service's interactions with its external dependencies.
+    * **Scope:** I'd use "narrow integration tests". For instance, one set of tests would verify that the service's data store adapter can correctly communicate with the database. Another would test the interaction with the inventory service, and a third for the billing API.
+    * **Implementation:** To keep these tests fast and reliable, I would use **test doubles** where appropriate.
+        * For the database, I'd use an in-memory fake if available, as it closely mimics the real implementation without the overhead of network calls.
+        * For the internal inventory service and the third-party billing API, I would use mocks combined with **contract tests**. The contract defines the expected request/response pairs, ensuring our mocks are valid and that our service can communicate correctly with the live APIs without actually calling them during the test. This avoids slow, flaky, and potentially costly test runs (e.g., creating real transactions).
+
+* **End-to-End Tests (Smallest Quantity):** Finally, I would have a very small number of end-to-end (E2E) tests.
+    * **Scope:** These tests are necessary to validate user-facing scenarios that span multiple services.
+    * **Implementation:** I would frame these as **user journey tests**. For example, a single E2E test might simulate a user creating an order, modifying it, and then canceling it. This approach is more efficient than writing separate E2E tests for each step. Because E2E tests are slow, brittle, and hard to debug, their number must be minimized.
+
+This layered strategy ensures we catch most bugs early with fast, cheap unit tests, while still having confidence that the integrated components and the entire user journey work as expected.
+
+---
+
+## Question 2: The Problem with Test Doubles
+
+**Scenario:** During a design discussion, a colleague suggests that to make your team's integration tests faster, you should replace all real dependencies (databases, other services) with mocks.
+
+**Question:** What are the potential dangers of relying too heavily on mocks and stubs? How can you mitigate these risks while still keeping tests efficient?
+
+### Solution
+
+While mocks and stubs can make tests faster and less flaky by reducing a test's size and eliminating external dependencies, over-reliance on them presents a significant risk: **they don't behave exactly like the real implementation**. The less a test double resembles the real dependency, the less confidence we can have in the test's usefulness. This can lead to a false sense of security where tests pass, but the application fails in production.
+
+Here's a breakdown of the issues and mitigation strategies:
+
+* **The Problem with Mocks/Stubs:**
+    * **Weak Resemblance:** Mocks and stubs are considered "last-resort" options because they offer the least resemblance to the actual implementation. They might not correctly model the dependency's latency, error modes, or subtle behaviors.
+    * **Brittle Tests:** Tests using mocks often verify the *interactions* between objects rather than the resulting state. This makes the tests brittle; they can break even when a refactoring doesn't change the actual behavior, violating a core principle of good testing.
+
+* **Mitigation Strategies:**
+    1.  **Prefer Real Implementations When Possible:** The first rule is to avoid a double if the real implementation is fast, deterministic, and has few dependencies of its own.
+    2.  **Use High-Fidelity Fakes:** If a real implementation isn't an option, the next best choice is a **fake**. A fake is a lightweight but working implementation of the dependency, such as an in-memory database. Ideally, this fake is maintained by the same team that owns the dependency, ensuring it stays up-to-date.
+    3.  **Combine Mocking with Contract Tests:** When mocks are unavoidable for external services, the best way to mitigate the risk is with **contract tests**.
+        * A contract test defines a strict request and its expected response for an external dependency (e.g., an HTTP request/response pair for a REST API).
+        * Our service's integration test then uses this contract to mock the dependency.
+        * Crucially, the external dependency's own test suite uses the *same contract* to run a test against their live service, guaranteeing that the response we are mocking is accurate and up-to-date. This ensures our mock doesn't drift from reality.
+
+By following this hierarchy—**Real > Fake > Mock with Contract**—we can write tests that are both efficient and provide strong guarantees that our service interacts correctly with its dependencies.
+
+---
+
+## Question 3: High-Stakes System Verification
+
+**Scenario:** You are designing a critical, zero-downtime data migration process to move a service from one key-value store (X) to another (Y). The plan involves dual-writing to both stores for a period, backfilling old data, and then switching reads to the new store.
+
+**Question:** This process is prone to subtle bugs, like race conditions, that are very difficult to catch with traditional testing. How could you verify the correctness of this migration *architecture* before implementation to prevent data inconsistency?
+
+### Solution
+
+For a high-stakes process like this, where subtle concurrency bugs can lead to data corruption, traditional testing is insufficient because it can only cover failures developers can imagine. A better approach is **Formal Verification**, which allows us to detect architectural flaws before writing any implementation code.
+
+Here’s how I would apply this concept:
+
+1.  **Create a Formal Specification:** I would write a high-level mathematical description of the migration process using a formal language like **TLA+**. Companies like Amazon and Microsoft use TLA+ for precisely this kind of complex distributed system design. The specification describes all possible states and behaviors of the system. This act of formally specifying the system itself helps clarify our reasoning and can uncover issues.
+
+2.  **Define System Properties:** The main goal is to verify that the specification satisfies key system properties, specifically **safety** and **liveness**.
+    * **Safety Property (Invariant):** An essential safety property here would be that "for any given key, the value in store X must always be consistent with the value in store Y after the backfill is complete." A safety property asserts that something bad never happens.
+    * **Liveness Property:** A liveness property would be that "the migration process eventually completes successfully".
+
+3.  **Use Automated Model Checking:** With the specification and properties defined, I would use a **model checker** for TLA+. This tool algorithmically explores all possible states and behaviors the system can enter, something humans are terrible at, especially with concurrency.
+
+4.  **Identify and Fix Flaws:** The model checker would likely identify critical flaws in the initial design. For example:
+    * **Race Condition:** As shown in the provided document, if two service instances write different values for the same key simultaneously, network latency could cause the writes to arrive in different orders at stores X and Y. This would leave the two data stores in permanently inconsistent states, violating our safety property.
+    * **Error Trace:** The beauty of model checking is that when it finds a flaw, it provides a specific **error trace**—a sequence of steps showing exactly how the system gets into the bad state. This makes the abstract bug concrete and easy to understand.
+
+
+
+By using formal verification, we can test our architectural decisions and find deep design flaws when they are still cheap to fix, gaining a much higher degree of confidence than is possible with testing alone.
