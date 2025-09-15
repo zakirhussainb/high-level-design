@@ -1002,3 +1002,102 @@ To make our service resilient to an unreliable downstream dependency, we need a 
 
 **How they work together:**
 A request is made with a **timeout**. If it times out, a **retry** might be attempted. If multiple retries also fail in a short period, the **circuit breaker** will trip, preventing any further calls for a while. This layered strategy ensures our service is protected from both short-term blips and long-term outages in its dependency.
+
+
+# System Design Interview Questions: Upstream Resiliency
+
+Here are interview questions and answers based on the provided chapter, focusing on designing services that are resilient to upstream pressure from clients and high load.
+
+---
+
+## Question 1: Load Shedding vs. Rate-Limiting
+
+**Scenario:** You are designing a public API for a new service. You need to implement mechanisms to protect your service from being overwhelmed by too many requests from clients. Two common patterns for rejecting excess traffic are **load shedding** and **rate-limiting**.
+
+**Question:** Compare and contrast these two patterns. On what basis does each one make its decision to reject a request, and in what situations would you choose one over the other?
+
+### Solution
+
+Both load shedding and rate-limiting are crucial for protecting a service, but they operate on different principles and are used to solve different problems.
+
+#### Basis for Decision-Making
+
+The most fundamental difference is the state they use to make decisions:
+
+* **Load Shedding** makes decisions based on the **local state** of a single server or process. It answers the question, *"Am I, this specific instance, overloaded right now?"* It's a reactive, self-preservation mechanism. For example, a server might track its number of concurrent active requests and start rejecting new ones with a `503 Service Unavailable` if that number exceeds a predefined capacity threshold.
+
+* **Rate-Limiting** makes decisions based on the **global state** of the system. It answers the question, *"How many requests has this specific user (or API key) made across the entire service fleet in the last minute?"* It's a proactive policy enforcement mechanism that requires coordination between all instances of the service, typically via a shared data store. It rejects requests with a `429 Too Many Requests` status code.
+
+#### When to Use Each Pattern
+
+* You would use **load shedding** to protect your service from unexpected, short-lived traffic spikes that threaten to exhaust its resources (like memory or threads), regardless of who the traffic is from. It's the last line of defense against being overwhelmed.
+
+* You would use **rate-limiting** to enforce business rules and ensure fair use. Common use cases include:
+    * **Enforcing pricing tiers**, where a customer paying more gets a higher request quota.
+    * **Preventing a single buggy client or non-malicious user** from accidentally monopolizing the service's resources and degrading performance for everyone else.
+
+In practice, a robust service would implement both: rate-limiting to enforce policy and load shedding as a safety net to protect individual instances from overload.
+
+---
+
+## Question 2: Designing a Distributed Rate Limiter
+
+**Scenario:** You've decided to implement a rate limiter for your public API, which runs on dozens of distributed server instances. The requirement is to limit each API key to 1,000 requests per minute.
+
+**Question:** Describe the high-level design of a distributed rate limiter. What algorithm would you use to efficiently track request counts? What are the three main implementation challenges you would face regarding the required shared data store, and how would you address them?
+
+### Solution
+
+A distributed rate limiter requires a central, shared data store (like Redis or DynamoDB) to maintain a global count of requests for each API key. All service instances coordinate through this store.
+
+#### Algorithm: Sliding Window with Buckets
+
+Storing a timestamp for every single request would be too memory-intensive. A much more efficient approach is the **sliding window algorithm using buckets**.
+
+* **How it works:** Time is divided into fixed-duration buckets (e.g., one-minute intervals). For each API key, we only need to store a counter for each bucket.
+* When a request arrives, we increment the counter for the current time bucket.
+* To get the total count for the last minute (the sliding window), we take a weighted sum of the counters in the current bucket and the previous bucket, based on how much the window overlaps with each.
+
+
+#### Implementation Challenges and Solutions
+
+1.  **Race Conditions:** If two instances read the count, increment it locally, and write it back, one of the increments could be lost.
+    * **Solution:** Do not use simple read-update-write transactions. Instead, use **atomic operations** provided by the data store, such as `INCR` (get-and-increment), which are much more performant and guarantee correctness.
+
+2.  **Data Store Load:** If every request from every instance results in a write to the central store, the store itself can become a bottleneck.
+    * **Solution:** To reduce the load, each service instance can **batch updates in memory**. For example, it could aggregate counts locally for a few seconds and then flush the batched update to the data store **asynchronously**.
+
+3.  **Data Store Unavailability:** If the central data store goes down, the rate limiter cannot function.
+    * **Solution:** In this situation, it is often better to **fail open**. This means if the data store is unavailable, we stop rate-limiting and allow requests to pass through. This prioritizes the **availability** of our main service over the strict enforcement of the rate-limiting policy. The service can continue to operate based on the last known state of the counters.
+
+---
+
+## Question 3: The Constant Work Principle
+
+**Scenario:** Your team manages a large fleet of services that receive their configuration from a central control plane. The current design works by having the control plane broadcast individual configuration changes to all service instances as they happen. This generally works fine, but during a recent incident, an operator made a large number of simultaneous changes, which created a massive "update storm" that overloaded both the control plane and the service instances.
+
+**Question:** Explain the concept of the **constant work** pattern and how it helps avoid this kind of "multi-modal behavior." Propose an alternative design for this configuration propagation system that adheres to this principle.
+
+### Solution
+
+The problem described is that the system exhibits **multi-modal behavior**—it behaves differently under normal conditions (few changes) versus under stress (many changes). This unpredictability can trigger rare bugs and makes the system operationally difficult. The **constant work** pattern is designed to solve this.
+
+#### The Constant Work Pattern
+
+The core idea is to design a system to perform the **same, predictable amount of work per unit of time, regardless of the load or the number of changes**. The goal is to make the system's worst-case performance as close to its average-case performance as possible, eliminating surprises.
+
+#### A Constant Work Design for Configuration Propagation
+
+Instead of the current "variable work" design, I would propose the following "constant work" solution:
+
+1.  The control plane will periodically (e.g., every minute) dump the **entire, complete configuration for all users** into a single file.
+2.  This file will be placed in a highly available object store, like AWS S3.
+3.  Each data plane instance will be configured to periodically fetch and process this **one single file** from the store.
+
+#### Benefits of this Approach
+
+At first glance, this seems less efficient. Why re-process the entire configuration if only one setting changed? However, the benefits for reliability and operational simplicity are immense:
+
+* **Reliable and Predictable:** The amount of work done by both the control plane and the data plane is now constant and predictable. It doesn't matter if zero settings changed or ten thousand settings changed in the last minute; the process is exactly the same. There are no "update storms."
+* **Simple and Self-Healing:** This design is much simpler to implement correctly than a complex delta-propagation mechanism. Furthermore, it's inherently self-healing. If a previous dump was corrupted or an instance missed an update, it doesn't matter; the next periodic update will automatically correct the state.
+* **Reduced Complexity:** While this pattern might be more expensive in terms of raw CPU or network bandwidth, it dramatically **increases reliability and reduces operational complexity**. This is often a very worthwhile trade-off in large-scale systems.
