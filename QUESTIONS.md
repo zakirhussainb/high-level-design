@@ -741,3 +741,84 @@ A SPOF is any component whose failure will cause the entire system to fail.
 * **Mitigation Strategies:**
     1.  **Remove the SPOF with Redundancy:** The best option is to eliminate the SPOF entirely by adding redundancy. For example, instead of one database instance, we run multiple replicas. For manual processes, we build **automation**.
     2.  **Reduce the Blast Radius:** If a SPOF cannot be removed (e.g., a root DNS provider), the goal is to **reduce its blast radius**—the amount of damage it causes when it fails. For example, we might use a DNS provider with a very long TTL (Time To Live) so that even if the provider goes down, clients can still use their cached DNS records for a while, giving us time to recover.
+
+
+# System Design Interview Questions: Redundancy
+
+Here are interview questions and answers based on the provided chapter, focusing on designing redundant, highly available systems at scale.
+
+---
+
+## Question 1: The Four Prerequisites of Redundancy
+
+**Scenario:** You are designing a simple, stateless microservice for resizing images. To ensure high availability, your plan is to run multiple identical instances of this service behind a load balancer.
+
+**Question:** Walk me through how this redundant setup handles the failure of a single instance. What are the four prerequisites that must be met for this redundancy strategy to be truly effective, and how does your stateless design satisfy each of them?
+
+### Solution
+
+In this stateless setup, redundancy provides a straightforward path to high availability. When one of the image resizing instances fails (e.g., due to a hardware fault), the load balancer is responsible for masking that failure from the client.
+
+However, for this to work reliably, four prerequisites must be met:
+
+1.  **Complexity shouldn't hurt availability:** The solution (a standard load balancer and multiple stateless instances) is a well-understood pattern. The complexity it adds is low and unlikely to introduce more failures than it prevents.
+2.  **Reliable failure detection:** This is a critical step. The **load balancer** must use **health checks** to reliably detect which instances are healthy and which have failed. If it can't detect a failure, it will continue sending a percentage of requests to the dead server, causing those requests to fail and lowering the overall availability of the service.
+3.  **Ability to operate in a degraded mode:** When the load balancer removes the failed instance from its pool, the system continues to operate with fewer instances. This is the **degraded mode**. It works as long as the remaining healthy servers have enough capacity to handle the increased load that is now directed to them.
+4.  **Ability to recover to a full-strength mode:** It's not enough to just run in a degraded mode indefinitely. We must have a mechanism (often an auto-scaling group) to automatically provision a **new server** to replace the one that failed. This recovery step restores the system to its fully redundant state, ensuring it has enough capacity to handle future load and tolerate another failure.
+
+Because the service is stateless, this process is relatively simple. A stateful service would be significantly more complex, as it would also require the replication of state.
+
+---
+
+## Question 2: Correlated Failures and Geographic Redundancy
+
+**Scenario:** A colleague is designing a new critical application. The plan is to deploy it across many servers, all located in a single data center, and they claim the application is "highly available" because every component has N+1 redundancy.
+
+**Question:** Why is this claim misleading? Explain the concept of **correlated failures** and how it limits the true availability of this single-data-center deployment. Then, describe two architectural patterns—multi-AZ and multi-region—to mitigate this risk, and what is the key difference between them regarding state replication?
+
+### Solution
+
+That claim is dangerously misleading because the effectiveness of redundancy hinges on one critical assumption: that failures are **uncorrelated**. This means the redundant nodes cannot all fail for the same reason at the same time.
+
+#### The Problem: Correlated Failures
+
+In a single data center, many potential faults are **correlated**. A single event like a power outage, a fiber cut, a cooling system failure, or a natural disaster can cause every server in that data center to fail simultaneously. When this happens, the N+1 redundancy becomes completely useless, as there are no healthy components left to take over. The availability of the application is therefore limited by the availability of the single data center itself.
+
+#### Mitigation Strategy 1: Multi-AZ Architecture
+
+Cloud providers design their infrastructure to solve this exact problem. A **region** is composed of multiple, physically separate data centers called **Availability Zones (AZs)**.
+* **How it works:** By deploying your application instances across multiple AZs within the same region, you protect against a data-center-wide correlated failure. If one AZ goes down, the instances in the other AZs remain healthy and can take over the load.
+* **State Replication:** AZs are connected by high-speed, low-latency networks. This allows for **synchronous** or partially synchronous state replication (using protocols like Raft). This means data can be written to multiple AZs simultaneously without a major performance penalty, ensuring strong consistency.
+
+#### Mitigation Strategy 2: Multi-Region Architecture
+
+To protect against a catastrophic event that could destroy an entire region (including all its AZs), you can duplicate your entire application stack in a second, geographically distant region.
+* **How it works:** Global DNS load balancing is used to direct users to a healthy region. If the primary region fails, traffic can be redirected to the secondary region.
+* **State Replication:** The key difference is that the network latency between distant regions is high. This makes synchronous replication impractical. Therefore, state must be replicated **asynchronously** between regions. This implies that if a failover occurs, some recent data that hasn't been replicated yet might be lost.
+
+---
+
+## Question 3: The Business Case for a Multi-Region Architecture
+
+**Scenario:** A business stakeholder is pushing for your successful e-commerce application, which currently runs in a single US region (spread across multiple AZs), to be deployed to a second region in Europe. Their reasoning is to achieve "the maximum possible uptime" and protect against a regional outage.
+
+**Question:** A multi-region architecture is a massive technical and financial investment. From a purely technical availability standpoint, how would you frame the trade-offs to this stakeholder? What is often a more compelling non-technical driver for adopting a multi-region architecture?
+
+### Solution
+
+I would start by acknowledging the stakeholder's goal of maximizing uptime, but then frame the decision in terms of cost vs. benefit, focusing on the actual risk being mitigated.
+
+#### The Technical Trade-Off
+
+From a purely technical availability perspective, the chance of an entire cloud region failing is **extremely low**. We are already protected against the most common large-scale failures (like a single data center outage) by being deployed across multiple Availability Zones.
+
+Therefore, the conversation becomes about risk management:
+* **The Risk:** We are protecting against a very-low-probability, very-high-impact event (a regional catastrophe).
+* **The Cost:** The cost is extremely high. It involves duplicating our entire infrastructure, managing complex asynchronous data replication, and solving challenges around global traffic management.
+* **The Question:** Is the massive engineering effort and operational cost justified to mitigate such an unlikely event? For many applications, the answer might be no, as a well-architected multi-AZ deployment is already highly available.
+
+#### A More Common Driver: Legal and Regulatory Compliance
+
+While the disaster recovery argument can be hard to justify, a much more common and compelling driver for a multi-region architecture is **legal and regulatory compliance**.
+
+Many countries and regions have **data residency laws**. For example, regulations like GDPR in Europe may mandate that the personal data of European citizens must be stored and processed on servers located physically within Europe. If our e-commerce application is expanding to serve European customers, we would be legally required to establish a presence in a European region to comply with these laws. This is often a non-negotiable business requirement that provides a much clearer justification for the investment than the marginal gain in availability.
