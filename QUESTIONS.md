@@ -648,3 +648,96 @@ Instead of the configuration setting being a simple boolean (on/off), it would b
 * **Decoupling:** This completely decouples experimentation from the development cycle. The product team can design, launch, and stop A/B tests simply by changing settings in the configuration management tool. They don't need to ask engineers to deploy new code for every new experiment.
 * **Agility:** It allows the team to run multiple experiments in parallel and iterate on product ideas much more quickly.
 * **Safety:** Just like with feature toggles, if one version of the experiment is found to have a major bug, it can be instantly disabled for all users by updating the configuration, without needing an emergency deployment.
+ 
+
+# System Design Interview Questions: Common Failure Causes
+
+Here are several interview questions and answers based on the provided chapter, focusing on how to reason about and mitigate common failures in large-scale systems.
+
+---
+
+## Question 1: Diagnosing "Gray Failures"
+
+**Scenario:** You are the on-call engineer for a large, microservice-based application. Users begin reporting that certain actions are extremely slow, sometimes timing out, but not failing completely. Your monitoring dashboards show no service crashes or significant error spikes, but you do see that latency is very high and memory usage for several services is steadily increasing.
+
+**Question:** Based on these symptoms of a **"gray failure,"** what are two of the most likely root causes? Explain how each of these issues can lead to a severe slowdown without causing an outright crash.
+
+### Solution
+
+This scenario, where a process is so slow it's as useless as one that has crashed, points to subtle issues that don't cause obvious failures. The two most likely causes are **network faults** and **resource leaks**.
+
+#### 1. Network Faults
+Network interactions in distributed systems are inherently unreliable, and slow network calls are described as the **"silent killers"** of these systems.
+
+* **How it causes a slowdown:** A client service making a call to another service doesn't know if the server is slow, has crashed, or if the network is just losing packets. The client may wait a very long time for a response before it finally times out. While it's waiting, the thread handling that request is blocked and can't do any other work. When this happens across many requests, the entire client service becomes sluggish and unresponsive, even though it hasn't technically crashed or logged any errors. This is a classic "gray failure" that is very difficult to debug.
+
+#### 2. Resource Leaks
+Resource leaks are a frequent cause of processes slowly grinding to a halt.
+
+* **How it causes a slowdown:**
+    * **Memory Leaks:** Even in garbage-collected languages, a leak can occur if a reference to an object is mistakenly kept, preventing its memory from being reclaimed. As memory fills up, the operating system starts swapping pages to disk, and the garbage collector runs more and more frequently, consuming CPU and dramatically slowing down the application. Eventually, it may fail when it can no longer allocate memory.
+    * **Thread/Socket Pool Exhaustion:** Modern applications use pools of resources like threads and network sockets. If a thread makes a synchronous, blocking network call **without a timeout** that never returns, that thread is leaked from the pool forever. Over time, all threads in the pool can be exhausted, and the service will be unable to process new requests, making it appear hung or extremely slow.
+
+Both of these issues create severe performance degradation that can be harder to diagnose than a simple crash.
+
+---
+
+## Question 2: The Cascading Failure Domino Effect
+
+**Scenario:** Imagine a popular social media platform where the "timeline service" fetches data from a user database. This database has two replicas, A and B, which sit behind a load balancer. Each replica is comfortably handling 500 transactions per second (tps), well within its capacity. Suddenly, Replica B fails due to a hardware fault.
+
+**Question:** Describe the sequence of events that could lead to a **cascading failure** that takes down the entire timeline service. What is a **"metastable failure,"** and how could it prevent the service from recovering even after Replica B is fixed?
+
+### Solution
+
+This is a classic scenario for a **cascading failure**, where a fault in one component spreads virally through the system due to the interdependencies between components.
+
+#### Sequence of Events for Cascading Failure
+
+1.  **Initial Fault:** Replica B fails. The load balancer detects this and correctly redirects all of its traffic to Replica A.
+2.  **Overload:** Replica A, which was handling 500 tps, is now hit with the full load of 1000 tps. If this is beyond its maximum capacity, its performance will degrade sharply.
+3.  **Client Timeouts:** The timeline service, which is a client of the database, starts experiencing slow responses and timeouts from Replica A.
+4.  **Retry Storm (Feedback Loop):** In response to the timeouts, the client instances of the timeline service begin to **retry** their failed requests. This is a critical mistake, as these retries add even *more* load onto the already struggling Replica A.
+5.  **Total Service Failure:** The combination of the doubled initial load and the self-inflicted retry storm completely overwhelms Replica A, causing it to fail as well. With both database replicas down, the entire timeline service is now unavailable.
+
+#### Metastable Failure and Recovery Difficulty
+
+Even if the initial fault is fixed (e.g., Replica B is brought back online), the system may not recover. This is known as a **metastable failure**.
+
+* **How it happens:** As soon as the restored Replica B comes online and is added back to the load balancer, it is immediately flooded with the massive amount of pent-up demand from all the clients that are still furiously retrying their requests. This sudden, immense load overwhelms the newly restored replica before it has a chance to stabilize, causing it to fail again. The system is now stuck in a failure state driven by a feedback loop, even though the original hardware fault is gone.
+
+The best way to handle such failures is to prevent the fault from spreading by breaking the feedback loop, for example, by implementing circuit breakers or temporarily blocking all traffic to allow the system to recover.
+
+---
+
+## Question 3: Proactive Risk Management
+
+**Scenario:** As the tech lead for a critical set of services, you've been tasked with creating a proactive plan to improve reliability. You identify that **configuration changes** and **single points of failure (SPOFs)** have been the top two causes of major outages in the past year.
+
+**Question:** What specific best practices would you implement to manage the risk from configuration changes? Furthermore, how would you identify potential SPOFs, and what are your primary strategies for mitigating them?
+
+### Solution
+
+This plan focuses on managing risk proactively by addressing the two highest-priority fault types. The overall goal is to either reduce the probability of a fault occurring or reduce its impact if it does.
+
+#### Managing Risk from Configuration Changes
+
+Configuration changes are one of the leading causes of catastrophic failures, especially because their impact can be **delayed**, making them hard to detect. A bad value might not be read by the application until hours or days after the change was made.
+
+* **Best Practices:** The core principle is to **treat configuration changes exactly like code changes**.
+    1.  **Version Control:** All configuration files must be stored in a version-control system like Git.
+    2.  **Testing and Validation:** We will build automated tests that validate configuration changes. This validation should happen preventively when the change is proposed, not when it's deployed.
+    3.  **Careful Release:** Configuration changes will go through the same careful, staged release process as our application code, using our CD pipeline.
+
+#### Identifying and Mitigating Single Points of Failure (SPOFs)
+
+A SPOF is any component whose failure will cause the entire system to fail.
+
+* **Identification:** The process is systematic. For every component in our architecture—from load balancers and databases to DNS providers and TLS certificate authorities—we must ask the question, **"What would happen if this failed?"** This helps us identify components that lack redundancy. Common but often overlooked SPOFs include:
+    * **Humans:** Manual deployment or recovery processes are prone to error.
+    * **DNS:** If clients can't resolve our domain, the service is down.
+    * **TLS Certificates:** An expired certificate will block all client connections.
+
+* **Mitigation Strategies:**
+    1.  **Remove the SPOF with Redundancy:** The best option is to eliminate the SPOF entirely by adding redundancy. For example, instead of one database instance, we run multiple replicas. For manual processes, we build **automation**.
+    2.  **Reduce the Blast Radius:** If a SPOF cannot be removed (e.g., a root DNS provider), the goal is to **reduce its blast radius**—the amount of damage it causes when it fails. For example, we might use a DNS provider with a very long TTL (Time To Live) so that even if the provider goes down, clients can still use their cached DNS records for a while, giving us time to recover.
