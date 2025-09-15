@@ -558,3 +558,93 @@ By looking at the complete trace for a slow request, we can generate a waterfall
 #### Primary Challenge
 
 The biggest challenge of tracing is that it is **difficult to retrofit** into an existing system. For it to work, **every single component** in the request path—including third-party frameworks, libraries, and services—must be instrumented to correctly receive and propagate the trace context (the trace ID). If even one component in the chain fails to pass it along, the trace becomes broken and incomplete.
+
+
+# System Design Interview Questions: Manageability
+
+Here are several interview questions and answers based on the provided chapter, focusing on designing manageable, large-scale systems.
+
+---
+
+## Question 1: Configuration Management Strategies
+
+**Scenario:** You are designing a new microservice. A discussion arises on your team about how to handle configuration settings like database connection strings (secrets) and internal cache sizes (behavioral settings).
+
+**Question:** Why is it critical to decouple configuration from code? Compare and contrast the two primary strategies for updating application configuration—static vs. dynamic—and explain the major drawback of the static approach.
+
+### Solution
+
+It's absolutely critical to decouple configuration from code for two main reasons: settings often change between different environments (like development vs. production), and they can contain sensitive data like credentials that should never be hardcoded into the application. The best practice is to store settings in a dedicated, external configuration store.
+
+Once the configuration is externalized, there are two main strategies for how the application consumes it:
+
+#### 1. Static Configuration (At Deployment Time)
+* **How it works:** In this model, the Continuous Delivery (CD) pipeline reads the configuration from the external store *during the deployment process*. The settings are then passed to the application instances, often through environment variables.
+* **Major Drawback:** The primary weakness of this approach is that **any change to the configuration requires a full redeployment of the application**. This is slow, cumbersome, and inefficient, especially for minor changes.
+
+#### 2. Dynamic Configuration (At Run Time)
+* **How it works:** This is a more advanced approach where the application is designed to periodically re-read its configuration from the store *while it is running*. When a setting is updated in the store, the running application instances detect the change and apply it on the fly, without needing to be restarted or redeployed. For example, if a setting changes, an HTTP handler that depends on it might be re-created with the new value.
+
+In summary, while static configuration is simpler to implement, its inflexibility makes it a poor choice for modern, large-scale systems. Dynamic configuration provides the foundation for much more powerful and agile operational capabilities.
+
+---
+
+## Question 2: Safely Releasing a High-Risk Feature
+
+**Scenario:** Your team is building a major new feature for a popular mobile banking app—the ability to trade stocks. This feature is complex and carries significant risk. The business wants to release code to production continuously, but enabling a buggy or incomplete trading feature for all users would be a catastrophe.
+
+**Question:** How would you use the principles of manageability, specifically **feature toggles**, to safely integrate and release this high-risk feature? Describe the lifecycle from initial deployment to the final, full rollout.
+
+### Solution
+
+This scenario is a perfect use case for **feature toggles** (also known as feature flags), which are a powerful technique enabled by dynamic configuration. This approach allows us to decouple the act of *deploying* code from the act of *releasing* a feature to users.
+
+Here is the lifecycle I would follow:
+
+#### 1. Deploy with the Feature Disabled
+All new code for the stock trading feature would be wrapped in a conditional block controlled by a feature toggle. This toggle would be a dynamic configuration setting stored in our external configuration store. We would deploy the new code to production with this feature toggle set to **"disabled"** by default.
+
+* **Benefit:** This allows the new, unfinished code to be merged and safely deployed to the production environment without affecting any users. The code is present but inactive.
+
+#### 2. Internal Testing in Production
+Once the code is in production, we can change the dynamic configuration to enable the feature toggle for a very specific, small group of users—such as the internal development and QA teams.
+
+* **Benefit:** This allows us to test the feature in the real production environment, with real infrastructure and data, but without any risk to actual customers.
+
+#### 3. Progressive Rollout (Canary Release)
+After we've built confidence through internal testing, we can begin a progressive rollout to actual users. Using the dynamic configuration system, we would:
+* First, enable the feature for a small fraction of users, perhaps 1% of the user base.
+* We would closely monitor our metrics and dashboards to ensure the feature is behaving as expected and not causing any negative side effects.
+* If all looks good, we would gradually increase the percentage of users who have the feature enabled—to 5%, then 25%, 50%, and finally 100%.
+
+#### 4. Full Release and Cleanup
+Once the feature is enabled for 100% of users and has been stable for a period, the process is complete. The feature toggle can eventually be removed from the codebase to reduce technical debt. If at any point during the rollout a critical bug is found, we can instantly disable the feature for everyone by changing the single configuration setting, effectively acting as an "emergency stop" without needing a frantic rollback deployment.
+
+---
+
+## Question 3: Implementing A/B Testing
+
+**Scenario:** The product team for an e-commerce site wants to test two different layouts for the product details page to see which one results in more users adding items to their cart.
+
+**Question:** Explain how the same dynamic configuration system used for feature toggles can be leveraged to implement this A/B test. How does this approach benefit the development and product teams?
+
+### Solution
+
+The same dynamic configuration mechanism that powers feature toggles is perfectly suited for running **A/B tests**. It allows us to show different versions of a feature to different segments of users and measure the impact, all without requiring new code deployments for each experiment.
+
+#### How it Works
+
+Instead of the configuration setting being a simple boolean (on/off), it would be a setting that can hold multiple values, for instance, `"layout_A"` or `"layout_B"`.
+
+1.  **Code Implementation:** The application code would be written to read this dynamic configuration setting for each user. Based on the value it receives, it would render either Layout A or Layout B.
+2.  **Configuration and Targeting:** Our dynamic configuration store would be responsible for the targeting logic. We would configure it to assign users to different groups. For example, it could be set to:
+    * Show `"layout_A"` to 50% of users.
+    * Show `"layout_B"` to the other 50% of users.
+    The user segmentation can be based on random assignment or specific user attributes.
+3.  **Measurement:** The application would emit metrics tagged with the experiment group (`layout_A` or `layout_B`). This allows us to analyze our dashboards and see which version is performing better against our key metric (e.g., "add to cart" rate).
+
+#### Benefits of this Approach
+
+* **Decoupling:** This completely decouples experimentation from the development cycle. The product team can design, launch, and stop A/B tests simply by changing settings in the configuration management tool. They don't need to ask engineers to deploy new code for every new experiment.
+* **Agility:** It allows the team to run multiple experiments in parallel and iterate on product ideas much more quickly.
+* **Safety:** Just like with feature toggles, if one version of the experiment is found to have a major bug, it can be instantly disabled for all users by updating the configuration, without needing an emergency deployment.
