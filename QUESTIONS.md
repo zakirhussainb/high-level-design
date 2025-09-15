@@ -246,3 +246,107 @@ Here’s how I would apply this concept:
 
 
 By using formal verification, we can test our architectural decisions and find deep design flaws when they are still cheap to fix, gaining a much higher degree of confidence than is possible with testing alone.
+
+
+# System Design Interview Questions: Continuous Delivery & Deployment
+
+Here are some interview questions and answers based on the provided chapter, focusing on designing robust CD pipelines for large-scale systems.
+
+---
+
+## Question 1: Designing a CD Pipeline from Scratch
+
+**Scenario:** You are the lead engineer for a high-traffic, globally distributed service. Currently, your team performs manual releases, which are slow and error-prone, leading to instability.
+
+**Question:** Design a complete, automated Continuous Delivery and Deployment (CD) pipeline to improve release safety and efficiency. Describe each stage of the pipeline and the critical activities that occur within them.
+
+### Solution
+
+To replace the problematic manual process, I would design an automated CD pipeline with four distinct stages. The core principle is that any change merged into the main repository should be able to roll out to production safely and automatically.
+
+
+
+Here are the stages of the pipeline:
+
+#### 1. Review Stage
+This is the first gatekeeper for any code change.
+* **Trigger:** A developer submits a pull request (PR).
+* **Automated Checks:** The pipeline automatically compiles the code, runs static analysis, and executes a battery of fast, small-scale tests. These checks must complete within minutes to provide quick feedback.
+* **Human Review:** A team member must review and approve the PR. They use a checklist to ensure the change includes necessary tests and observability (metrics, logs) and can be safely rolled back if needed.
+* **Infrastructure as Code (IaC):** All changes, including infrastructure dependencies (like VMs or databases), should be declared as code (e.g., using Terraform), version-controlled, and go through this same review process. This is critical as un-reviewed configuration changes are a common source of production failures.
+
+#### 2. Build Stage
+Once the PR is approved and merged into the main branch, this stage begins.
+* **Activity:** The pipeline takes the repository's content and packages it into a single, deployable **release artifact**.
+
+#### 3. Pre-production Rollout Stage
+Before touching production, the artifact is deployed to a synthetic environment.
+* **Purpose:** This stage acts as a quick sanity check to catch major issues early, as deploying here is much faster than to production.
+* **Verification:** We verify that the service starts without hard failures (like a crash on startup due to a missing configuration) and that a suite of end-to-end tests passes successfully. The health of the artifact should be assessed using the same signals (metrics, alerts) that will be used in production to ensure consistency.
+
+#### 4. Production Rollout Stage
+After passing pre-production, the artifact is ready for a careful, staged release to the live environment.
+* **Initial Release:** The rollout begins by deploying to a very small number of production instances to minimize the "blast radius" of a potential failure.
+* **Incremental Release:** If the initial release is deemed healthy, the artifact is incrementally released to the rest of the fleet.
+* **Multi-Region Strategy:** Since the service is globally distributed, the pipeline will start with a low-traffic region first. It will then proceed through the remaining regions in sequential stages, rather than all at once, to further limit risk.
+
+This automated, multi-stage pipeline provides a strong balance between release speed and safety, which is essential for any large-scale service.
+
+---
+
+## Question 2: Ensuring Rollout Safety and Automated Rollbacks
+
+**Scenario:** In the production rollout stage of your CD pipeline, a newly deployed artifact introduces a subtle performance degradation (e.g., increased latency) that wasn't caught in pre-production testing.
+
+**Question:** How should your CD pipeline automatically detect this regression and respond? What health signals should it monitor, and what factors determine whether to perform an automatic rollback versus alerting an on-call engineer?
+
+### Solution
+
+A core responsibility of a CD pipeline is to automatically assess the health of a deployment and trigger a rollback if a regression is detected. Here's how I would design this safety mechanism:
+
+#### Health Signals for Detection
+To detect issues like performance degradation, the pipeline cannot rely on a single signal. It must monitor a combination of health indicators after each incremental deployment step:
+* **Health Metrics:** This is the most important signal for subtle issues. The pipeline must monitor key service metrics like **error rates and latencies**. A significant spike in either would indicate a problem.
+* **Alerts:** The pipeline should also monitor for any triggered alerts related to the service's health.
+* **End-to-End Tests:** A suite of tests running against the newly deployed instances can confirm core functionality is working.
+* **Upstream/Downstream Health:** It's not enough to monitor the service in isolation. The pipeline must also watch the health of **upstream and downstream services** to detect if the new release is causing cascading failures.
+
+#### Bake Time
+Some issues, like memory leaks or performance degradation under peak load, only appear over time.
+* To catch these, the pipeline must pause for a **"bake time"** after each deployment step to allow the artifact to run for a while and collect sufficient health data before proceeding.
+* This bake time can be dynamic; for example, it could wait until a specific API endpoint has served a minimum number of requests to ensure it has been properly exercised.
+
+#### Response Strategy: Automatic Rollback vs. Alerting
+When the pipeline detects a health signal degradation, it must immediately stop the rollout. The next step involves a trade-off:
+* **Automatic Rollback:** For clear, high-severity signals (e.g., a massive spike in errors, critical E2E test failures), the pipeline should be configured to **automatically roll back** to the previous stable version. This prioritizes immediate recovery over diagnosis.
+* **Alerting an On-Call Engineer:** For less clear signals (e.g., a minor increase in latency), an automatic rollback might be an overreaction. In these cases, the pipeline can **trigger an alert to engage the on-call engineer**. The engineer can then investigate and decide whether to retry the failed stage or manually initiate a rollback through the pipeline. This prevents the pipeline from being overly sensitive and allows for human judgment.
+
+This comprehensive monitoring and response strategy ensures that regressions are caught and handled quickly, minimizing impact on users.
+
+---
+
+## Question 3: Handling Backward-Incompatible Changes
+
+**Scenario:** Your team needs to change the serialization format of a message schema used between a producer service and a consumer service. This is a **backward-incompatible change**; if the producer starts sending the new format before the consumer is ready, the consumer will fail.
+
+**Question:** How would you release this change safely using a CD pipeline with zero downtime? Explain the step-by-step process.
+
+### Solution
+
+The cardinal rule for CD pipelines is that **all changes should be backward-compatible** whenever possible, because this ensures they can be rolled back safely. Rolling *forward* with a hotfix is much riskier than rolling back.
+
+Since this change is inherently backward-incompatible, the only safe way to release it is to break it down into a sequence of smaller, backward-compatible changes that are deployed separately. I would implement a three-phase "prepare, activate, cleanup" strategy.
+
+#### Phase 1: Prepare Change
+* **Action:** Modify the **consumer** service to understand *both* the old and the new messaging formats. The consumer can now accept messages in either schema without errors.
+* **Deployment:** This change is fully backward-compatible. We deploy it through the normal CD pipeline. At the end of this phase, all consumer instances are ready for the new format, but the producer is still only sending the old one.
+
+#### Phase 2: Activate Change
+* **Action:** Modify the **producer** service to start writing messages in the **new format** exclusively.
+* **Deployment:** This change is also backward-compatible because we've already prepared all the consumers to handle it. We deploy this change through the CD pipeline. If we need to roll back the *producer* for any reason, the consumers can still handle the old format, ensuring a safe rollback path.
+
+#### Phase 3: Cleanup Change
+* **Action:** After the "activate" change has been in production long enough that we are confident we won't need to roll it back, we can remove the old code path. We modify the **consumer** to stop supporting the old messaging format. This reduces technical debt.
+* **Deployment:** This final change is deployed through the CD pipeline.
+
+By breaking the one risky change into three safe, sequential, and independently deployable changes, we can perform a complex migration with zero downtime and ensure that every step of the process is fully reversible.
