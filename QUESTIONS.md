@@ -822,3 +822,87 @@ Therefore, the conversation becomes about risk management:
 While the disaster recovery argument can be hard to justify, a much more common and compelling driver for a multi-region architecture is **legal and regulatory compliance**.
 
 Many countries and regions have **data residency laws**. For example, regulations like GDPR in Europe may mandate that the personal data of European citizens must be stored and processed on servers located physically within Europe. If our e-commerce application is expanding to serve European customers, we would be legally required to establish a presence in a European region to comply with these laws. This is often a non-negotiable business requirement that provides a much clearer justification for the investment than the marginal gain in availability.
+
+
+# System Design Interview Questions: Fault Isolation
+
+Here are several interview questions and answers based on the provided chapter, focusing on designing resilient, large-scale systems that can withstand correlated failures.
+
+---
+
+## Question 1: Containing the "Blast Radius" of a Poison Pill
+
+**Scenario:** You operate a large, multi-tenant API service. A single customer begins sending a specific, malformed request (a "poison pill") that exploits a previously unknown bug in your code. Any server instance that processes this request immediately crashes. Your service has many redundant instances, but because any instance can receive this request, the issue threatens to cause a cascading, system-wide outage.
+
+**Question:** Why is simple redundancy ineffective against this type of failure? Describe a fault isolation strategy you could use to contain the "blast radius" of this poison pill request and protect the majority of your users. What is this pattern commonly called?
+
+### Solution
+
+Simple redundancy is ineffective here because the failure is highly **correlated**. The bug exists in the code on *every* redundant instance, so simply having more instances doesn't solve the problem—the poison pill can take down any of them. The fundamental issue is that the **blast radius** of this failure is the entire application.
+
+#### The Bulkhead Pattern
+
+The solution is to implement **fault isolation** by partitioning the application stack. This technique is also known as the **bulkhead pattern**, named after the sealed compartments in a ship's hull that prevent a single leak from sinking the entire vessel.
+
+* **How it works:**
+    1.  We would divide our pool of server instances into several smaller, isolated partitions (or "bulkheads").
+    2.  We would then assign each customer to a specific, fixed partition.
+    3.  A load balancer or gateway would be responsible for routing a customer's requests *only* to the instances within their assigned partition.
+
+* **The Result:** Now, when the problematic customer sends the poison pill request, the impact is completely contained within their assigned partition. Only the servers in that one partition will crash. The servers in all other partitions are never exposed to the request and will continue to operate normally, serving their assigned customers without any disruption. This strategy successfully reduces the blast radius from 100% of the system to just a single partition.
+
+
+---
+
+## Question 2: Advanced Partitioning with Shuffle Sharding
+
+**Scenario:** Following a "noisy neighbor" incident where one customer's high load degraded performance for others, your team implemented a basic bulkhead pattern. Your stateless service has 8 server instances, which you've divided into 4 physical partitions of 2 instances each. This works, but when one partition is impacted, *all* customers in that partition (25% of your user base) are affected.
+
+**Question:** Describe a more advanced partitioning technique called **shuffle sharding** that you could apply to this stateless service. Explain how it dramatically reduces the probability that any two "noisy" customers will impact each other.
+
+### Solution
+
+While standard partitioning is good, **shuffle sharding** is a far more powerful variation for stateless services that significantly improves fault isolation. The problem with standard partitioning is that if a partition is degraded, all users assigned to it are impacted.
+
+#### The Shuffle Sharding Concept
+
+The core idea of shuffle sharding is to create **virtual partitions** composed of a random, but permanent, subset of the available service instances. This dramatically reduces the probability that any two users will be assigned to the exact same set of instances.
+
+* **Standard Partitioning (The "Before"):** With 8 instances and 4 partitions, a noisy neighbor in Partition 1 affects every other user in Partition 1. The chance of two specific users sharing a partition is 1 in 4 (25%).
+
+* **Shuffle Sharding (The "After"):**
+    1.  Instead of 4 fixed partitions, we now consider the 8 instances as a single pool.
+    2.  For each customer, we create a virtual shard by randomly selecting 2 instances from the pool of 8. For example, Customer A might be assigned to instances `{1, 5}` and Customer B to `{2, 5}`.
+    3.  The number of possible unique, 2-instance virtual partitions we can create from 8 instances is 28 ($\frac{8!}{2!6!}$).
+    4.  This means the probability of two customers being assigned to the *exact same* two instances is now only 1 in 28, which is dramatically lower than 1 in 4.
+
+
+Even if two noisy customers have a partially overlapping shard (like Customer A on `{1, 5}` and Customer B on `{2, 5}`), the system is more resilient. If Customer A's traffic takes down instance 5, Customer B can still be served by instance 2. When this is combined with a load balancer that removes faulty instances and clients that retry requests, the result is significantly better fault isolation.
+
+---
+
+## Question 3: Designing a Cellular Architecture
+
+**Scenario:** You are tasked with designing a new, large-scale cloud object storage system, similar to Amazon S3. A key requirement is that the system must be extremely reliable and scalable to handle massive growth.
+
+**Question:** Describe how you would apply a **cellular architecture** to this problem. What constitutes a "cell" in this design? How does this architecture handle scaling, and what is the key, non-obvious reliability benefit of this approach?
+
+### Solution
+
+A **cellular architecture** is the ideal design for a system of this scale and criticality. It takes the concept of partitioning and extends it to the entire application stack.
+
+#### Cellular Design for a Storage System
+
+In this design, the entire stack—load balancers, front-end services, metadata partitions, and the physical storage layer—is partitioned into completely independent, self-contained deployments called **cells**.
+
+* **What is a Cell?** Each "storage cluster" would be a cell. It would contain all the necessary components to function as a miniature, standalone version of the entire storage service.
+* **Routing:** A global gateway or location service would sit in front of all the cells. When a new account is created, this service would allocate it to a specific cell. When a user wants to access a file, they would first look up which cell their account belongs to, and then their request would be routed directly to that cell.
+
+
+#### Scaling and the Key Reliability Benefit
+
+The most powerful aspect of a cellular architecture is how it elegantly handles scaling and improves reliability in a non-obvious way.
+
+* **How it Scales:** Each cell is designed with a **fixed maximum capacity**. When more overall system capacity is needed, we do **not** try to make the existing cells bigger. Instead, we simply provision a **brand new, identical cell**. This "scale by adding units" approach is much simpler and more predictable than trying to grow a monolithic system indefinitely.
+
+* **The Key Reliability Benefit:** Because each cell has a fixed maximum size, we can **thoroughly test and benchmark** a single cell at its absolute maximum capacity before it ever serves production traffic. This gives us extremely high confidence that we understand its performance limits and that it will not hit unexpected performance walls or failure modes in the future. We are effectively stamping out copies of a component whose behavior we know with a high degree of certainty, which is a massive win for reliability at scale.
