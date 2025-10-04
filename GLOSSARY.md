@@ -129,3 +129,7 @@ A CDN is an overlay network of geographically distributed caching servers (rever
 **Internet Service Provider (ISP)**
 
 An Internet Service Provider (ISP) is a company that provides individuals, businesses, and other organizations with access to the internet and related services. ISPs manage the infrastructure required to connect users to the internet, which can include services like web hosting, email, and domain registration.
+
+**Garbage Collection Cycle**
+
+**Page Faults**
