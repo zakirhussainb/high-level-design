@@ -1101,3 +1101,79 @@ At first glance, this seems less efficient. Why re-process the entire configurat
 * **Reliable and Predictable:** The amount of work done by both the control plane and the data plane is now constant and predictable. It doesn't matter if zero settings changed or ten thousand settings changed in the last minute; the process is exactly the same. There are no "update storms."
 * **Simple and Self-Healing:** This design is much simpler to implement correctly than a complex delta-propagation mechanism. Furthermore, it's inherently self-healing. If a previous dump was corrupted or an instance missed an update, it doesn't matter; the next periodic update will automatically correct the state.
 * **Reduced Complexity:** While this pattern might be more expensive in terms of raw CPU or network bandwidth, it dramatically **increases reliability and reduces operational complexity**. This is often a very worthwhile trade-off in large-scale systems.
+
+# System Design Interview Questions: Failure Detection
+
+Here are interview questions and answers based on the provided chapter, focusing on the fundamental concepts of detecting failures in distributed systems.
+
+---
+
+## Question 1: The Fundamental Challenge of Timeouts
+
+**Scenario:** You are designing a client application that interacts with a critical backend service. You need to implement a mechanism to handle cases where the service doesn't respond to your client's requests. The most common approach is to use a timeout.
+
+**Question:** Why is it impossible to build a "perfect" failure detector in a distributed system? Explain the fundamental challenge of choosing a timeout duration and the consequences of setting it too short versus too long.
+
+### Solution
+
+It's impossible to build a perfect failure detector because of the inherent **uncertainty** in a distributed system. When a client sends a request and doesn't get a response, it cannot know the exact cause. The problem could be:
+* The server is just slow and is still processing the request.
+* The server has crashed.
+* A network issue dropped the client's request on its way to the server.
+* A network issue dropped the server's response on its way back to the client.
+
+Because the client can't distinguish between these cases, the best it can do is make an educated guess that the server is unavailable after a certain amount of time has passed.
+
+
+This leads to the fundamental challenge of choosing the right duration for a timeout:
+
+* **If the timeout is too short:** The client might incorrectly conclude that the server has failed when it is merely being slow. This can lead to unnecessary retries or errors, reducing the system's overall availability.
+* **If the timeout is too long:** The client might waste valuable time and hold onto resources (like threads or connections) waiting for a response that will never arrive from a server that has truly crashed. This can degrade the client's performance and impact the user experience.
+
+Choosing the right timeout duration is a critical trade-off between responsiveness and avoiding false positives.
+
+---
+
+## Question 2: Proactive vs. Reactive Failure Detection
+
+**Scenario:** Imagine you are designing a system with two key components: a central **job scheduler** and a fleet of **worker nodes**. The scheduler's primary responsibility is to assign tasks to available workers. It is critical that the scheduler does not assign a new task to a worker node that has crashed.
+
+**Question:** Compare and contrast the two primary approaches to failure detection: **reactive** and **proactive**. Which approach would be more suitable for the job scheduler to use to check the health of its worker nodes, and why?
+
+### Solution
+
+The two approaches differ in *when* they detect a failure.
+
+* **Reactive Detection:** This is the most common approach, where failures are detected at the time of communication. A client (like the scheduler) sends a request to a server (a worker) and, if it doesn't get a response within a **timeout**, it considers the server to be unavailable. It's simple but only provides information when you're already trying to do something.
+
+* **Proactive Detection:** This approach involves actively monitoring the health of other processes *before* a real request needs to be sent. Instead of waiting for a task-assignment request to fail, the scheduler would constantly check the availability of the workers in the background.
+
+For the job scheduler and worker fleet, **proactive failure detection** is the more suitable approach.
+
+The document states that proactive methods are used for processes that interact frequently and where an **immediate action must be taken** as soon as a process becomes unreachable. In this case, the scheduler needs to know the health of the worker fleet *before* it makes a scheduling decision. By proactively monitoring the workers, it can maintain an up-to-date list of healthy nodes and avoid wasting time trying to assign a job to a node that is already known to be down.
+
+---
+
+## Question 3: Pings vs. Heartbeats
+
+**Scenario:** You are designing a high-availability primary/secondary (leader/follower) system, such as a database cluster. A central **cluster manager** node is responsible for monitoring the health of the active **primary node**. If the primary node fails, the cluster manager must immediately initiate a failover to promote the secondary node.
+
+**Question:** Describe the two main mechanisms for proactive failure detection: **pings** and **heartbeats**. Explain the key difference in how they work, and which mechanism would be more appropriate for the cluster manager to use to monitor the primary node?
+
+### Solution
+
+Both pings and heartbeats are proactive monitoring mechanisms, but they differ in the direction of the health check.
+
+#### Pings
+* **How it works:** In this model, the monitoring process (the cluster manager) actively sends a `ping` request to the process being monitored (the primary node). The manager then expects to receive a `pong` response within a specific timeout. If no response arrives, the manager considers the primary node to be unavailable.
+* **Responsibility:** The **monitor** is responsible for initiating the check.
+
+#### Heartbeats
+* **How it works:** In this model, the process being monitored (the primary node) periodically sends a `heartbeat` message to the monitoring process (the cluster manager). The manager expects to receive these heartbeats at a regular interval. If a heartbeat doesn't arrive within the expected timeframe, the manager's timeout triggers, and it considers the primary node to be unavailable.
+* **Responsibility:** The **monitored** process is responsible for announcing its own health.
+
+#### Which is More Appropriate?
+
+For a central cluster manager monitoring a critical primary node, the **ping** mechanism is generally more appropriate.
+
+The responsibility for detecting the failure lies with the cluster manager, so it makes more logical sense for the manager to be the one actively probing the primary node's health. This is a direct and explicit check. A heartbeat relies on the primary node to be healthy enough to send the heartbeat, and a failure to receive a heartbeat is an implicit signal of a problem. A ping is an explicit test of reachability and responsiveness initiated by the component that needs to take action.
