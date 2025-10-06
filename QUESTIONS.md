@@ -2424,3 +2424,94 @@ To prevent this, we need to build defenses on both the client (application) and 
 1.  **Origin-Side Defense (Load Shedding):** The origin system (the database or a service in front of it) must be prepared to handle sudden traffic surges. It should implement **load shedding**, where it proactively rejects excess requests once it reaches capacity. This is a form of graceful degradation. It's better for the origin to serve a fraction of requests correctly than to crash while trying to serve them all.
 
 2.  **Client-Side Defense (Multi-Layer Caching):** The clients could use a **local, in-process cache** as a fallback or second layer of defense. If the external cache is unavailable, the application can try to serve the request from its own smaller, in-memory cache. While this won't have the same hit ratio as the large external cache, it can help absorb some of the shock and reduce the load spike on the origin during the external cache's outage.
+
+
+# System Design Interview Questions: Microservices
+
+Here are several interview questions and answers based on the provided chapter, focusing on the trade-offs, patterns, and challenges of a microservice architecture.
+
+---
+
+## Question 1: The Monolith vs. Microservices Trade-off
+
+**Scenario:** Your company is starting a new project to build an e-commerce platform. The engineering leadership is debating whether to start with a traditional monolithic architecture or to build it as a microservices architecture from day one.
+
+**Question:** What are the major drawbacks of a large, monolithic application that often lead teams to consider microservices? Conversely, what is the **"microservice premium"**—the set of complexities and challenges that a microservice architecture introduces? Based on these trade-offs, what is the general recommendation for a new project?
+
+### Solution
+
+This is a classic architectural decision with significant long-term consequences. Both approaches have distinct advantages and disadvantages.
+
+#### Problems with a Growing Monolith
+
+As a monolithic application grows, it often suffers from several key problems:
+* **Increasing Coupling:** Components become tightly coupled over time, making it hard to change one part without unintentionally affecting others.
+* **Cognitive Overhead:** The codebase can become so large and complex that no single developer fully understands the entire system, which slows down bug fixing and feature development.
+* **Deployment Bottlenecks:** A change to even a single, small component requires the entire application to be rebuilt, tested, and redeployed. A bug in one part can force a rollback of changes from many different developers.
+* **Lack of Fault Isolation:** A bug in one component (like a memory leak) can consume resources and degrade the performance of, or even crash, the entire application.
+
+#### The "Microservice Premium" (Downsides of Microservices)
+
+While microservices solve these problems, they do so by introducing a great deal of new complexity—a "premium" that is only worth paying at a certain scale. The main challenges are:
+* **Distributed System Complexity:** Remote calls between services are expensive and unreliable. You must deal with network latency, non-determinism, and a much larger surface area for failures.
+* **Risk of a "Distributed Monolith":** If services are not designed to be loosely coupled, you can end up with the worst of both worlds: all the downsides of a monolith combined with the complexity of a distributed system.
+* **Operational Overhead:** A microservice architecture requires a significant investment in automation for resource provisioning, continuous delivery, and deployment.
+* **Debugging and Observability:** Debugging a failure that spans multiple services is significantly harder than stepping through a monolith's code. A good observability platform for centralized logging, tracing, and metrics becomes crucial.
+* **Eventual Consistency:** Since data is spread across multiple data stores, atomically updating data with strong consistency is very difficult. Microservice architectures usually require embracing eventual consistency.
+
+#### General Recommendation
+
+The general recommendation is to **start with a well-componentized monolith**. Decompose the application into services only when there is a good reason to do so—typically when the organizational scaling issues or deployment complexities of the monolith become a significant pain point. This approach allows boundaries to be moved more easily in the early stages of a project.
+
+---
+
+## Question 2: The Role and Responsibilities of an API Gateway
+
+**Scenario:** You have successfully decomposed a monolithic application into a set of fine-grained microservices. You now need to design a way for external clients, like a mobile app, to interact with them. Allowing the mobile app to call dozens of internal services directly is inefficient and exposes too much internal detail.
+
+**Question:** Explain the purpose of an **API Gateway** in a microservice architecture. Describe its three core responsibilities: **routing, composition, and translation**. Why is the composition function particularly useful for mobile clients?
+
+### Solution
+
+An API Gateway is a crucial pattern in a microservice architecture. It acts as a **facade** or reverse proxy that sits between external clients and the internal microservices, providing a single, unified public API. This hides the internal complexity of the system from the outside world.
+
+
+#### Core Responsibilities of an API Gateway
+
+1.  **Routing:** This is its most basic function. The gateway maintains a routing map that defines how public API endpoints map to the APIs of the internal services. This decouples the public API from the internal architecture; an internal service's address or endpoint can change without breaking external clients, as only the gateway's mapping needs to be updated.
+
+2.  **Composition:** In a microservice architecture, data is spread across multiple services. A single client operation might require fetching data from several of them. The API Gateway can provide a higher-level API that, in a single request from the client, queries multiple internal services and **composes** their responses into a single, aggregated response.
+    * This is especially useful for **mobile clients** because it reduces the number of network round-trips they need to make, which saves battery life and improves performance over high-latency mobile networks.
+
+3.  **Translation:** The gateway can act as a protocol translator. For example, it can translate an external, public-facing RESTful HTTP request into an internal gRPC call. It can also provide different API flavors tailored to different clients (e.g., a "heavy" API for a desktop app and a "light," batched API for a mobile app). A popular technology for this is **GraphQL**, which allows the gateway to expose a flexible schema that clients can query to fetch exactly the data they need.
+
+---
+
+## Question 3: Authentication and Authorization in Microservices
+
+**Scenario:** You are designing the security for your microservice-based system, which is fronted by an API Gateway. You need to handle both **authentication** (verifying a user's identity) and **authorization** (checking their permissions to perform an action).
+
+**Question:** How would you distribute these two responsibilities between the API Gateway and the individual backend microservices? Describe the typical flow of a secure request, explaining the role of a **security token** in communicating the user's identity from the gateway to the internal services.
+
+### Solution
+
+Handling security is a critical cross-cutting concern. The standard and most effective pattern is to divide the responsibilities between the gateway and the individual services.
+
+#### Division of Responsibility
+
+* **Authentication (at the API Gateway):** Authentication is the process of validating who a user is. This should be **centralized at the API Gateway**. The gateway is the single point of entry for all external requests, making it the logical place to handle different authentication mechanisms (e.g., session cookies, API keys, OAuth) and shield the internal services from this complexity.
+* **Authorization (at the Individual Services):** Authorization is the process of determining if an authenticated user has permission to perform a specific action on a specific resource. This is best left to the **individual services**. The API gateway should not be coupled with the domain-specific business logic and permissions of every service behind it.
+
+#### The Secure Request Flow
+
+1.  **Client Request:** An external client sends a request to a public endpoint on the API Gateway, including its credentials (e.g., a session cookie or an API key).
+
+2.  **Authentication at Gateway:** The **API Gateway authenticates** the request. It validates the credentials and identifies the user (the principal).
+
+3.  **Token Creation:** After successful authentication, the gateway creates a **security token**. This token contains information about the principal, such as their user ID and roles (e.g., "admin," "user"). A popular format for this is a **JSON Web Token (JWT)**, which is a JSON payload that is digitally signed by the gateway.
+
+4.  **Internal Request:** The gateway then forwards the request to the appropriate internal microservice, including the newly created security token (often in an HTTP header like `Authorization: Bearer <token>`).
+
+5.  **Token Validation and Authorization:** The internal service receives the request. It first **validates the token's signature** to ensure it came from a trusted source (the gateway) and has not been tampered with. It can do this without any external network calls. After extracting the principal's identity and roles from the token, the service then performs its own **authorization logic** to determine if this specific principal is allowed to perform the requested operation.
+
+This pattern provides a secure and decoupled way to handle security, centralizing authentication while allowing each service to be the authority on its own permissions.
