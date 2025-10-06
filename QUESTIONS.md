@@ -1933,3 +1933,87 @@ The CDN effectively acts as a "fast lane" for dynamic requests, reducing the ove
 When a CDN is used as the frontend for the entire application (both static and dynamic content), it provides a crucial security benefit: it helps **shield the application from Distributed Denial-of-Service (DDoS) attacks**.
 
 Because all traffic must first pass through the CDN's massive, globally distributed infrastructure, the CDN can absorb and filter out the vast majority of malicious traffic from a DDoS attack before it ever reaches the much smaller, more vulnerable origin server. The CDN's scale provides an effective defense that would be difficult for a typical application to build on its own.
+
+
+# System Design Interview Questions: Partitioning
+
+Here are several interview questions and answers based on the provided chapter, focusing on the strategies and challenges of partitioning (or sharding) data in large-scale systems.
+
+---
+
+## Question 1: Range Partitioning vs. Hash Partitioning
+
+**Scenario:** You are designing a new distributed key-value database and need to choose a strategy for partitioning the data across multiple nodes. The two primary methods to consider are **range partitioning** and **hash partitioning**.
+
+**Question:** Compare and contrast these two partitioning strategies. What is the main benefit and the main drawback of each approach, particularly concerning hotspots and the ability to perform efficient range scans?
+
+### Solution
+
+The choice between range and hash partitioning involves a fundamental trade-off between how data is organized and the types of queries that can be performed efficiently.
+
+#### Range Partitioning
+* **How it works:** Data is split into partitions based on a lexicographically sorted key range. For example, Partition 1 could hold keys from "A-H," Partition 2 from "I-P," and Partition 3 from "Q-Z."
+* **Main Benefit:** The primary advantage is that it preserves the sort order of the keys across the entire dataset. This makes it very efficient to perform **range scans**, such as fetching all keys between "cat" and "dog."
+* **Main Drawback:** It is highly susceptible to **hotspots**. If an application frequently accesses keys that are close together (e.g., partitioning by date and all new data is for the current day), all of that traffic will hit a single partition, creating a bottleneck and limiting scalability.
+
+
+#### Hash Partitioning
+* **How it works:** A hash function is used to deterministically map each key to a seemingly random number. The data is then partitioned based on ranges of these hash numbers.
+* **Main Benefit:** By randomizing the key distribution, hash partitioning generally ensures a much more **uniform and balanced** distribution of data across partitions. This makes it far less susceptible to hotspots caused by access patterns on contiguous keys.
+* **Main Drawback:** The primary disadvantage is that the sort order of the keys is lost. Keys that were originally next to each other, like "cat" and "cattle," will be hashed to completely different locations. This makes it impossible to perform efficient **range scans** across the entire dataset.
+
+**In summary:** Choose **range partitioning** if you need to perform frequent range scans and can manage potential hotspots. Choose **hash partitioning** if you need a more balanced data distribution and your access pattern is primarily by individual key lookups.
+
+---
+
+## Question 2: The Rebalancing Problem and Consistent Hashing
+
+**Scenario:** Your team has implemented a hash-partitioned cache using a simple `hash(key) mod N` formula, where N is the number of cache servers. The system works, but when you try to add a new server to the cluster to handle more load (changing N to N+1), the cache hit rate plummets and the entire system grinds to a halt due to a massive data reshuffling.
+
+**Question:** Explain why the simple modulo-based hashing approach is so problematic when rebalancing. Then, describe a superior strategy called **consistent hashing**. How does its "imaginary circle" model work, and why does it dramatically reduce the amount of data that needs to be moved when a node is added?
+
+### Solution
+
+The `hash(key) mod N` approach is brittle because the partition a key belongs to is directly dependent on the total number of partitions, `N`. When you add a new server, `N` becomes `N+1`, which changes the result of the modulo operation for almost **every single key** in the system. This forces a massive and expensive reshuffling of nearly all the data across the network, which is why the system grinds to a halt.
+
+#### Consistent Hashing: A Better Approach
+
+**Consistent hashing** is a widely used strategy that is designed to solve this exact problem by minimizing the amount of data that needs to be moved during rebalancing.
+
+* **How it works:**
+    1.  **The Hash Ring:** Consistent hashing works by mapping both partition identifiers and keys onto an imaginary circle (often called a hash ring). A hash function is used to give each partition and each key a seemingly random position on this circle.
+    2.  **Key Assignment:** Each key is assigned to the first partition that appears on the circle in a **clockwise direction** from the key's own position.
+
+
+* **Why it's Better for Rebalancing:**
+    The magic of consistent hashing becomes clear when a new partition is added.
+    1.  **Adding a Node:** When a new partition, `P4`, is added to the ring, it is placed at a new random position.
+    2.  **Minimal Data Movement:** The only keys that need to be moved are the ones whose clockwise walk around the circle now encounters `P4` first, instead of their old partition. All other key-to-partition assignments remain completely unchanged.
+    3.  **Result:** Instead of a massive, system-wide reshuffle, adding a node only requires moving a small fraction of the keys from one existing node to the new one. This makes adding and removing nodes a much cheaper and less disruptive operation.
+
+
+---
+
+## Question 3: Identifying and Mitigating Hotspots
+
+**Scenario:** You have designed a social media application where user data is partitioned across many servers. You notice that a few celebrity accounts are orders of magnitude more popular than others, receiving a vastly disproportionate amount of traffic. All requests related to these celebrity users (e.g., fetching their profile, posts, and comments) are hitting the same partition, creating a "hotspot" that degrades performance for all other (non-celebrity) users who happen to be on that same partition.
+
+**Question:** This "hotspot" problem is limiting your system's scalability. Explain how this issue can occur in both **range-partitioned** and **hash-partitioned** systems. What are some strategies you could use to mitigate a hotspot caused by a single, frequently accessed key?
+
+### Solution
+
+A hotspot occurs when one partition is accessed much more frequently than others, and it's a critical scalability challenge in any partitioned system.
+
+#### How Hotspots Occur
+
+* **In Range-Partitioned Systems:** Hotspots often occur due to the application's access patterns. For example, if we partition user data by signup date, a sudden event (like a viral marketing campaign) could cause a flood of new signups, all of which would hit the single partition responsible for the current date range.
+* **In Hash-Partitioned Systems:** Hash partitioning distributes keys well, but it cannot eliminate hotspots caused by a non-uniform access pattern. If a single key (like a celebrity's user ID) is accessed very frequently, the partition that hosts that key's hash will become overloaded, regardless of how well other keys are distributed.
+
+#### Mitigation Strategies for a Single Hot Key
+
+When a hotspot is caused by a single, extremely popular key (like the celebrity account), simply rebalancing the partitions won't help, as the hot key will just move to a different partition and create a new hotspot there. The solution is to split the work for the hot key itself.
+
+One common strategy mentioned in the text is to **split the key into sub-keys**.
+
+* **How it works:** Instead of having a single key `celebrity_user_id`, we can add a random prefix or suffix to it. For example, when a read request for the celebrity comes in, we can prepend a random number from 1 to 10 to the key, such as `5-celebrity_user_id`.
+* **The Result:** The read requests for this single user are now spread across 10 different keys, which will be hashed to 10 different partitions. This effectively distributes the load for the single hot user across multiple nodes. The trade-off is that this adds complexity, as writes to this user's data would now have to be written to all 10 sub-keys to ensure reads get the latest data.
