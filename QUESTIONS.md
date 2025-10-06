@@ -2113,3 +2113,96 @@ To achieve strong durability and consistency, the Azure Storage design uses **ch
 This decision to build the system with **strong consistency** from its inception was a significant architectural choice. It meant that once a write was acknowledged, all subsequent reads were guaranteed to see that new data.
 
 This differentiated it from its main competitor at the time, **AWS S3**. Historically, AWS S3 initially offered **eventual consistency** for some operations (specifically, overwrites and deletes). This meant that for a short period after an update, a read operation was not guaranteed to return the newest version of the data. While S3 has since evolved and now provides strong read-after-write consistency (as of 2021), this initial design difference highlights a fundamental trade-off in distributed systems between strong consistency and other factors like latency and availability.
+
+
+# System Design Interview Questions: Network Load Balancing
+
+Here are several interview questions and answers based on the provided chapter, focusing on the concepts, features, and different implementations of load balancing in large-scale systems.
+
+---
+
+## Question 1: L4 vs. L7 Load Balancers
+
+**Scenario:** You are designing the network entry point for a large-scale web application. You need to choose a load balancing solution to distribute incoming traffic across a fleet of stateless application servers. The two primary types of dedicated load balancers are Transport Layer (L4) and Application Layer (L7).
+
+**Question:** Compare and contrast **L4 and L7 load balancers**. At what layer of the OSI model does each operate? What are the key differences in how they handle network connections, and what advanced, application-aware features can an L7 load balancer provide that an L4 cannot?
+
+### Solution
+
+L4 and L7 load balancers both distribute traffic, but they operate at different levels of the network stack, which gives them fundamentally different capabilities.
+
+#### L4 (Transport Layer) Load Balancer
+* **Operating Level:** Operates at Layer 4 of the OSI model, the TCP/UDP layer.
+* **Connection Handling:** An L4 load balancer is not aware of application-level protocols like HTTP. It simply shuffles packets back and forth between a client and a selected backend server for the duration of a TCP connection. It identifies a connection by a tuple of `(source IP/port, destination IP/port)` and forwards all packets for that connection to the same server. It does not inspect the content of the packets.
+* **Key Characteristic:** It's essentially a "byte shuffler" with high throughput but limited intelligence.
+
+#### L7 (Application Layer) Load Balancer
+* **Operating Level:** Operates at Layer 7, the application layer. It understands protocols like HTTP/HTTPS.
+* **Connection Handling:** An L7 load balancer (which is a type of reverse proxy) terminates the client's TCP connection and establishes a *new* TCP connection to the selected backend server. This means two separate connections are involved, with the L7 load balancer acting as a full intermediary.
+* **Key Characteristic:** Because it understands HTTP, it can inspect requests and make much more intelligent routing decisions.
+
+#### Advanced Features of an L7 Load Balancer
+
+Because an L7 load balancer is HTTP-aware, it can provide many advanced features that an L4 load balancer cannot:
+
+* **TLS Termination:** It can decrypt HTTPS traffic, offloading the expensive SSL/TLS processing work from the backend application servers.
+* **Content-Based Routing:** It can route requests based on information in the HTTP request, such as the URL path (`/api/v2/*` goes to one pool of servers, `/images/*` to another) or headers.
+* **Sticky Sessions (Session Affinity):** It can inspect a session cookie and ensure that all requests from the same user session are routed to the same backend server, which is useful for in-memory session caching.
+* **HTTP/2 De-multiplexing:** It can intelligently balance individual HTTP/2 streams that are multiplexed over a single TCP connection, preventing one resource-intensive request from blocking others.
+
+In a typical large-scale setup, an L4 load balancer is often used in front of a fleet of L7 load balancers to handle the initial high-volume traffic and provide DDoS protection, while the L7 balancers provide the richer, application-level routing.
+
+---
+
+## Question 2: Health Checks and Zero-Downtime Deployments
+
+**Scenario:** You are the lead engineer for a critical, highly available service. Your fleet of servers sits behind a load balancer that performs **active health checks** by periodically polling a `/health` endpoint on each server. You need to be able to deploy new versions of your application with zero downtime.
+
+**Question:** Describe how you can leverage this active health check mechanism to perform a safe, zero-downtime rolling update of your application servers. What does it mean to "drain" a server, and how does the health check enable this process?
+
+### Solution
+
+Active health checks are a core feature of a load balancer that not only improves availability by detecting faulty servers but also enables critical operational procedures like zero-downtime deployments.
+
+#### The Zero-Downtime Rolling Update Process
+
+Here's how we can use the health check mechanism to perform a rolling update, one server at a time:
+
+1.  **Mark Server for Update:** We select the first server in the fleet that we want to update.
+2.  **Signal Unhealthy:** Before touching the server, we first signal to it that it should start reporting itself as "unhealthy." The application logic is modified so that when it receives this signal, its `/health` endpoint begins returning a `5xx` status code instead of the usual `200 OK`.
+3.  **Load Balancer Reacts:** The load balancer, during its next periodic health check, sees the `5xx` response and marks the server as unhealthy. It immediately **stops sending any new incoming requests** to this server.
+4.  **Connection Draining:** At this point, the server is "draining." It is no longer accepting new traffic, but it is still alive and finishing the processing of any in-flight requests it had already accepted. This is a crucial step to prevent errors or abruptly cutting off users.
+5.  **Perform the Update:** After a safe waiting period to allow for draining to complete, the server can be safely shut down, updated with the new application version, and restarted.
+6.  **Signal Healthy:** Once the server is back up and running the new version, its `/health` endpoint will automatically start reporting `200 OK` again.
+7.  **Return to Pool:** The load balancer will detect the healthy status on its next check and will add the server back into the pool of available servers, allowing it to start accepting new requests again.
+
+This process is then repeated for every other server in the fleet, one by one, until the entire deployment is complete. By using the health check as a control mechanism, we can gracefully remove servers from the active pool without dropping a single request, achieving a true zero-downtime update.
+
+---
+
+## Question 3: The Sidecar Pattern for Service-to-Service Communication
+
+**Scenario:** Your company is moving from a monolith to a microservices architecture. You now have dozens of internal services that need to communicate with each other reliably and efficiently. The traditional approach of routing all this internal traffic through a dedicated, centralized tier of L7 load balancers is becoming a management bottleneck and a potential single point of failure.
+
+**Question:** Describe an alternative, decentralized approach for handling internal, service-to-service load balancing known as the **sidecar pattern** (or **service mesh**). Where does the load balancing logic reside in this model, and what are its main advantages and disadvantages compared to using a dedicated load balancer?
+
+### Solution
+
+The sidecar pattern, also known as a service mesh, is a modern approach that decentralizes load balancing logic, moving it from a dedicated tier to the clients themselves.
+
+#### How the Sidecar Pattern Works
+
+* **Co-location:** A "sidecar" proxy process (like Envoy, NGINX, or HAProxy) is deployed on the same machine (or in the same container pod) as each client application instance.
+* **Traffic Interception:** This sidecar is configured to intercept all outbound network traffic from the client application.
+* **Client-Side Load Balancing:** The sidecar itself acts as an intelligent, L7 load balancer. It maintains a list of available backend service instances (discovered via a coordination service) and routes the client's outgoing requests to a healthy instance.
+
+From the application's perspective, it thinks it's just talking to `localhost`, and the sidecar transparently handles the service discovery, load balancing, retries, and monitoring.
+
+#### Advantages Over a Dedicated Load Balancer
+
+* **Removes a Bottleneck:** It eliminates the need for a separate, dedicated load balancer tier that must be scaled and maintained. This removes a potential single point of failure and performance bottleneck from the architecture.
+* **Richer Client-Side Features:** The sidecar can implement many other resiliency and observability features on behalf of the application, such as rate-limiting, authentication, circuit breaking, and detailed metric collection.
+
+#### Disadvantages
+
+* **Increased Complexity:** The primary disadvantage is a significant increase in operational complexity. While you've removed the dedicated load balancer tier, you now have hundreds or thousands of sidecar proxies to manage. This necessitates a sophisticated **control plane** to configure, update, and manage the entire fleet of sidecars, which is a complex system in itself.
