@@ -1554,3 +1554,96 @@ Causal consistency can be implemented by having the client and server track the 
 
 
 This dependency-checking mechanism ensures that the causal chain of events is never violated anywhere in the system.
+
+
+# System Design Interview Questions: Transactions
+
+Here are several interview questions and answers based on the provided chapter, focusing on the concepts of ACID, concurrency control, and distributed transactions in large-scale systems.
+
+---
+
+## Question 1: Concurrency Control Strategies
+
+**Scenario:** You are designing the transaction engine for a new database. You need to select a concurrency control protocol to ensure transactions have **isolation** and don't interfere with each other. The expected workload for the database is mixed, but a significant portion will be read-heavy analytics queries.
+
+**Question:** Compare and contrast three fundamental concurrency control mechanisms: **Pessimistic (Two-Phase Locking)**, **Optimistic (OCC)**, and **Multi-Version (MVCC)**. What are the core assumptions and drawbacks of each, and which would be most suitable for your read-heavy workload?
+
+### Solution
+
+Choosing the right concurrency control protocol is a critical trade-off between performance and how conflicts are handled.
+
+#### 1. Pessimistic Control (e.g., Two-Phase Locking - 2PL)
+* **Core Assumption:** Assumes conflicts are likely.
+* **How it works:** It uses locks to prevent transactions from interfering with each other. A transaction must acquire a read (shared) lock to read an object and a write (exclusive) lock to modify it. All locks are held until the transaction commits or aborts.
+* **Drawback:** The main drawback is the risk of **deadlock**, where two transactions get stuck waiting for each other's locks. The database must have a mechanism to detect and break deadlocks, usually by aborting one of the transactions.
+
+#### 2. Optimistic Control (e.g., Optimistic Concurrency Control - OCC)
+* **Core Assumption:** Assumes conflicts are rare.
+* **How it works:** Transactions execute on a private workspace without taking any locks. When a transaction is ready to commit, the system performs a validation step to check if its work conflicts with any other concurrently running transaction. If there's no conflict, the changes are applied.
+* **Drawback:** If a conflict *is* detected during validation, the transaction is **aborted** and must be completely restarted by the client. This can be very inefficient if conflicts are frequent.
+
+#### 3. Multi-Version Concurrency Control (MVCC)
+* **Core Assumption:** Most transactions are read-only.
+* **How it works:** This is the most widely used scheme today. The database maintains older versions of data. When a read-only transaction starts, it is given a consistent **snapshot** of the database at that point in time. It can read from this snapshot without blocking or being blocked by write transactions. Write transactions still use a pessimistic (2PL) or optimistic (OCC) protocol to handle conflicts *with other write transactions*.
+* **Benefit:** Because readers and writers don't block each other, MVCC provides a **significant performance improvement** for read-heavy workloads.
+
+Given the mixed but significantly read-heavy workload, **MVCC** would be the most suitable choice. It provides excellent performance for the analytics queries (read-only transactions) by allowing them to run on a snapshot without interfering with the ongoing write transactions.
+
+---
+
+## Question 2: The Two-Phase Commit (2PC) Protocol
+
+**Scenario:** You are building a microservices-based e-commerce application. A single user action, such as "place order," requires atomically updating state in multiple different services (e.g., an `Orders` service and an `Inventory` service), each with its own separate database. You need to ensure that this entire operation is atomic—it should either completely succeed or completely fail.
+
+**Question:** Describe the **Two-Phase Commit (2PC)** protocol. Walk through the "prepare" and "commit" phases, explaining the roles of the coordinator and participants. What are the two major drawbacks of 2PC that make it challenging to use in practice?
+
+### Solution
+
+Two-Phase Commit (2PC) is a distributed commit protocol used to achieve atomic transaction commits across multiple distributed participants. It requires a central **coordinator** (which could be one of the services, like the `Orders` service) and one or more **participants** (the other services involved, like `Inventory`).
+
+
+The protocol works in two phases:
+
+#### Phase 1: Prepare Phase
+1.  The coordinator sends a `prepare` message to all participants, asking if they are ready to commit the transaction.
+2.  Each participant does the necessary work to get into a committable state (e.g., writing changes to its own Write-Ahead Log) and then responds with a "yes" or "no" vote.
+3.  A "yes" vote is a binding promise. Once a participant votes "yes," it is locked in and cannot unilaterally abort the transaction; it must wait for the coordinator's final decision.
+
+#### Phase 2: Commit Phase
+1.  **If the coordinator receives "yes" from all participants**, it makes the final decision to commit and sends a `commit` message to all of them.
+2.  **If the coordinator receives even one "no" vote or a participant times out**, it makes the final decision to abort and sends an `abort` message to all participants.
+
+#### Major Drawbacks of 2PC
+
+While 2PC provides atomicity, it has two significant drawbacks that limit its use:
+
+1.  **It is slow:** It is a chatty protocol that requires multiple network round-trips before a transaction can be committed, which increases latency.
+2.  **It is a blocking protocol:** This is its most critical flaw. If the **coordinator fails** after the participants have voted "yes" but before it has sent the final commit/abort message, the **participants are stuck**. They must hold their locks and wait, potentially indefinitely, for the coordinator to recover. This can bring a large part of the system to a halt.
+
+---
+
+## Question 3: Designing a "NewSQL" Database like Spanner
+
+**Scenario:** An interviewer asks you to design a globally distributed, fault-tolerant database that provides strong ACID transactional guarantees, similar to Google's Spanner. The system must support transactions that span multiple partitions (shards) located in different data centers.
+
+**Question:** Describe a high-level architecture for such a "NewSQL" database. How would you handle transactions that affect only a single partition versus transactions that span multiple partitions? Crucially, how does this design solve the main "blocking" drawback of the standard 2PC protocol?
+
+### Solution
+
+A NewSQL database like Spanner is designed to combine the scalability of NoSQL systems with the strong transactional guarantees of traditional databases. The architecture is built on layers of replication and established protocols.
+
+#### High-Level Architecture
+
+1.  **Partitioning and Replication:** The data is broken into **partitions**. Each partition is itself a fault-tolerant system, with its data replicated across multiple machines (replicas) in different data centers using a state machine replication protocol like Paxos or Raft. Within each partition, one replica acts as the **leader**.
+2.  **Single-Partition Transactions:** If a transaction only involves data within a single partition, it is handled efficiently by the **leader of that partition**. The leader can use a standard concurrency control protocol like **Two-Phase Locking (2PL)** to ensure isolation for that transaction.
+3.  **Multi-Partition Transactions:** For transactions that span multiple partitions, the system must use a distributed commit protocol. Spanner uses **Two-Phase Commit (2PC)**. In this case, one of the involved partition leaders is designated as the **coordinator** for the 2PC protocol, and the leaders of the other involved partitions act as **participants**.
+
+
+#### Solving the "Blocking" Problem of 2PC
+
+The main drawback of standard 2PC is that if the coordinator fails, the participants are blocked. Spanner's design solves this by making the coordinator itself fault-tolerant.
+
+* **Replicated Coordinator State:** In Spanner's architecture, the coordinator is a partition leader. The state of that leader—including its progress in the 2PC protocol—is **replicated** across the other replicas in its partition using the underlying consensus protocol.
+* **Fault-Tolerant Recovery:** If the machine acting as the coordinator crashes, the leader election mechanism within its partition will elect a **new leader** from one of the healthy replicas. This new leader can read the replicated log, determine the state of the in-progress 2PC transaction, and **resume the protocol**, sending the final `commit` or `abort` message to the participants.
+
+By making the coordinator fault-tolerant through replication, this design ensures that participants will never be blocked indefinitely, thus solving the primary flaw of the standard 2PC protocol.
