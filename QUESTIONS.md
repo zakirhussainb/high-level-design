@@ -1647,3 +1647,102 @@ The main drawback of standard 2PC is that if the coordinator fails, the particip
 * **Fault-Tolerant Recovery:** If the machine acting as the coordinator crashes, the leader election mechanism within its partition will elect a **new leader** from one of the healthy replicas. This new leader can read the replicated log, determine the state of the in-progress 2PC transaction, and **resume the protocol**, sending the final `commit` or `abort` message to the participants.
 
 By making the coordinator fault-tolerant through replication, this design ensures that participants will never be blocked indefinitely, thus solving the primary flaw of the standard 2PC protocol.
+
+
+# System Design Interview Questions: Asynchronous Transactions
+
+Here are several interview questions and answers based on the provided chapter, focusing on designing atomic, long-running operations in distributed systems without using traditional blocking protocols.
+
+---
+
+## Question 1: The Outbox Pattern for Atomic Updates
+
+**Scenario:** You are designing a `ProductCatalog` microservice that uses a relational database as its primary source of truth. Whenever a product's price or description is updated in this database, you also need to update a separate Elasticsearch cluster (for searching) and a Redis cache (for fast lookups). You cannot use a distributed transaction protocol like Two-Phase Commit (2PC) because it would tightly couple these systems.
+
+**Question:** How can you ensure that the database, search index, and cache are all updated atomically? Describe the **Outbox Pattern**, explaining the roles of the local ACID transaction, the outbox table, and the relay process. Why is **idempotency** a critical requirement for the destination services?
+
+### Solution
+
+The challenge here is to avoid leaving the system in an inconsistent state, which could happen if the service crashes after updating the database but *before* it updates the search index and cache. The **Outbox Pattern** solves this by leveraging the atomicity of a local database transaction.
+
+#### How the Outbox Pattern Works
+
+1.  **Atomic Write to Database and Outbox:** When a product is updated, the service performs this work within a **single, local ACID transaction**. Critically, in the *same transaction*, it also inserts a message describing the change (e.g., "product 123 price changed to $99.99") into a special `outbox` table within the same database.
+
+2.  **Atomicity Guarantee:** Because both the `products` table update and the `outbox` table insert happen in one transaction, it's an all-or-nothing operation. The message is guaranteed to be created in the outbox if and only if the product change is successfully committed. The two operations are now atomic.
+
+3.  **The Relay Process:** A separate, dedicated **relay process** continuously monitors the `outbox` table for new messages to be sent.
+
+4.  **Message Delivery:** When the relay finds a new message, it sends it to the destination systems (e.g., Elasticsearch and Redis), often via a durable message channel like Kafka. The relay only deletes the message from the outbox table after it receives a successful acknowledgement of delivery from the destination.
+
+#### The Critical Role of Idempotency
+
+**Idempotency** is essential for the destination services because the relay process can fail. For instance, the relay might send the message but crash before it can delete it from the outbox. Upon restarting, it would find the same message and send it again.
+
+To handle this, each message is given a **unique idempotency key**. The destination services (Elasticsearch and Redis) must be designed to track the keys of messages they have already processed. If they receive a message with a key they've already seen, they can safely ignore it, ensuring each change is processed **exactly once**.
+
+---
+
+## Question 2: The Saga Pattern for Long-Running Workflows
+
+**Scenario:** You are designing a travel booking application. A customer's request to "book a trip" is a long-running workflow that involves three separate steps, each handled by a different microservice: 1) book a flight, 2) reserve a hotel, and 3) rent a car. The entire process must be atomic: if the car rental fails, the already-booked flight and hotel must be canceled. This process cannot hold database locks for its entire duration.
+
+**Question:** Describe how you would implement this distributed transaction using the **Saga Pattern** with a central orchestrator. Explain the concepts of **forward transactions** and **compensating transactions**, and walk through the sequence of events for a failed booking.
+
+### Solution
+
+This is a classic use case for the **Saga Pattern**, which manages atomicity in long-running distributed transactions by coordinating a sequence of local transactions.
+
+#### Forward and Compensating Transactions
+
+A saga consists of a series of steps. For each step that moves the process forward, there must be a corresponding step that can undo it.
+* **Forward Transactions (Ti):** These are the steps that execute the business logic. For example: `T1 = BookFlight`, `T2 = BookHotel`, `T3 = BookCar`.
+* **Compensating Transactions (Ci):** For every forward transaction, there is a compensating transaction that can semantically undo its effects. For example: `C1 = CancelFlight`, `C2 = CancelHotel`, `C3 = CancelCarRental`.
+
+The saga guarantees that either all forward transactions (`T1, T2, T3`) complete successfully, or it will execute the necessary compensating transactions to leave the system in its original state, thus ensuring atomicity.
+
+#### Orchestration-based Saga Workflow
+
+We can implement this with a central **orchestrator** that manages the state of the transaction.
+
+**Failure Scenario (Car Rental Fails):**
+1.  **Start:** The orchestrator starts the saga and persists its state (e.g., `state: BOOKING_FLIGHT`).
+2.  **Step 1 (Book Flight):** The orchestrator sends an asynchronous command to the `Flight` service to execute `T1`.
+3.  **Step 1 Success:** The `Flight` service succeeds, books the flight, and sends a "success" message back. The orchestrator updates its state to `state: BOOKING_HOTEL`.
+4.  **Step 2 (Book Hotel):** The orchestrator sends a command to the `Hotel` service to execute `T2`.
+5.  **Step 2 Success:** The `Hotel` service succeeds and replies. The orchestrator updates its state to `state: BOOKING_CAR`.
+6.  **Step 3 (Book Car):** The orchestrator sends a command to the `Car` service to execute `T3`.
+7.  **Step 3 Failure:** The `Car` service **fails** (e.g., no cars available) and sends a "failure" message back.
+8.  **Compensation Triggered:** The orchestrator, seeing the failure, begins the rollback process. It updates its state to `state: CANCELLING_HOTEL`.
+9.  **Step 2 Compensation (Cancel Hotel):** The orchestrator sends a command to the `Hotel` service to execute `C2`. The hotel reservation is canceled.
+10. **Step 1 Compensation (Cancel Flight):** After the hotel cancellation succeeds, the orchestrator updates its state to `state: CANCELLING_FLIGHT` and sends a command to the `Flight` service to execute `C1`. The flight is canceled.
+11. **End:** Once all compensations are complete, the saga ends in a failed state, but the system is consistent.
+
+
+---
+
+## Question 3: Handling the Lack of Isolation in Sagas
+
+**Scenario:** In the travel booking saga you just described, another part of the system—a `Billing` service—needs to read a user's active bookings to calculate a preliminary trip total. However, while the saga is in progress, the system's state is inconsistent (e.g., a flight is booked, but the hotel is not yet confirmed). If the `Billing` service reads this intermediate state, it could present an incorrect bill to the user.
+
+**Question:** Asynchronous transactions like Sagas sacrifice the **isolation** property of ACID. How does this lead to the problem described? Explain the concept of **semantic locks** and describe two strategies the `Billing` service could use when it encounters data that has been marked as "dirty" by the in-progress saga.
+
+### Solution
+
+The problem arises because Sagas, unlike traditional ACID transactions, are not **isolated**. While a saga is executing, its partial changes are visible to other parts of the system. This means the `Billing` service can observe an inconsistent, intermediate state (e.g., a flight booking without a corresponding hotel booking), which can lead to incorrect calculations.
+
+#### The Solution: Semantic Locks
+
+To work around this lack of isolation, we can use a mechanism called **semantic locks**. This isn't a true database lock, but rather an application-level flag that signals the state of the data.
+
+* **How it works:** When the booking saga begins, it places a "dirty" flag (the semantic lock) on the user's trip record in the database. This flag indicates that the record is currently being modified by a long-running process and is in an inconsistent state. The flag is only cleared when the saga completes successfully or is fully compensated.
+
+#### Strategies for the `Billing` Service
+
+When the `Billing` service attempts to read a trip record and finds that the "dirty" flag is set, it knows it cannot trust the data. It can then be programmed to handle this situation in one of two ways:
+
+1.  **Fail Immediately:** The billing operation could be designed to fail fast and roll back its own changes. It might return an error like, "Trip details are currently being updated, please try again in a moment." This prioritizes showing consistent data, even if it means a temporary failure.
+
+2.  **Wait for Completion:** Alternatively, the billing operation could be designed to **wait**. It would pause and periodically check the "dirty" flag until the booking saga completes and the flag is cleared. At that point, it can safely read the consistent, final state of the trip. This prioritizes completing the billing calculation, even if it means adding some latency.
+
+The choice between these two strategies depends on the specific business requirements of the `Billing` service.
