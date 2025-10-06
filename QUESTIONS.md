@@ -1746,3 +1746,95 @@ When the `Billing` service attempts to read a trip record and finds that the "di
 2.  **Wait for Completion:** Alternatively, the billing operation could be designed to **wait**. It would pause and periodically check the "dirty" flag until the booking saga completes and the flag is cleared. At that point, it can safely read the consistent, final state of the trip. This prioritizes completing the billing calculation, even if it means adding some latency.
 
 The choice between these two strategies depends on the specific business requirements of the `Billing` service.
+
+
+# System Design Interview Questions: HTTP Caching
+
+Here are several interview questions and answers based on the provided chapter, focusing on the concepts and practical applications of caching in large-scale web systems.
+
+---
+
+## Question 1: The Conditional GET and Cache Validation
+
+**Scenario:** A user's web browser has previously downloaded a resource, `/api/products/42`, and stored it in its local cache. The `Cache-Control` header specified a `max-age` of 300 seconds. Five minutes have now passed, making the cached resource "stale." The user requests the same resource again.
+
+**Question:** Describe the full HTTP workflow for handling this stale resource. Explain the roles of the **`ETag`** and **`If-None-Match`** headers in this process. What is the key optimization the server can make if the resource has *not* actually changed?
+
+### Solution
+
+When a browser's cache determines that a resource is stale, it doesn't immediately discard it. Instead, it uses a mechanism called a **conditional GET** to ask the server if its cached version is still valid. This is far more efficient than re-downloading the entire resource unconditionally.
+
+
+#### The Cache Validation Workflow
+
+1.  **Client Sends Conditional Request:** The client's cache sends a `GET /api/products/42` request to the origin server. Crucially, it includes an **`If-None-Match`** request header. The value of this header is the **`ETag`** (e.g., `"v0.1"`) of the stale resource it has in its cache. The `ETag` is a version identifier that the server provided in the original response.
+
+2.  **Server Validates the Version:** The server receives the request and compares the `ETag` from the `If-None-Match` header with the current `ETag` of the resource on the server.
+
+3.  **Server Responds:**
+    * **If the resource HAS changed:** The server will find that the ETags do not match. It will respond with a `200 OK` status code and the full, updated resource in the response body, along with a new `ETag`.
+    * **If the resource HAS NOT changed:** This is the key optimization. The server sees that the client's version is still the current one. Instead of sending the entire resource again, it responds with a **`304 Not Modified`** status code. This response has **no body**, which saves a significant amount of network bandwidth.
+
+4.  **Client Updates Cache:** Upon receiving the `304 Not Modified` response, the client's cache knows its copy is still good. It can now use its locally stored version and reset its freshness timer (TTL).
+
+This conditional GET flow allows the client to validate its cache with a very small, lightweight network request, avoiding unnecessary data transfer and speeding up load times.
+
+---
+
+## Question 2: Caching Strategy for Static Assets
+
+**Scenario:** You are the lead engineer for a large web application. You are responsible for defining the deployment and caching strategy for the application's static assets (JavaScript bundles, CSS files, images, fonts). Your goal is to configure caching as aggressively as possible to maximize performance and minimize server load.
+
+**Question:** What is the ideal caching strategy for these static resources? How should they be treated with respect to mutability, and how would you handle deploying updates to these assets without requiring users to manually clear their caches?
+
+### Solution
+
+The ideal strategy is to treat static resources as **immutable**. This allows us to configure clients to cache them for a very long time, effectively "forever."
+
+#### The Immutable Caching Strategy
+
+1.  **Long-Lived Caching:** When the server responds with a static asset, it should include a `Cache-Control` header with a very long `max-age`. The HTTP specification allows for caching up to one year (e.g., `Cache-Control: max-age=31536000`). This tells the browser that it can safely store and reuse this file for a long time without ever needing to re-validate it with the server.
+
+2.  **Versioning URLs for Updates:** The key to this strategy is how we handle updates. We never *change* a file in place. Instead, to update a static resource, we create a **new version of the file with a different URL**.
+
+    * For example, instead of naming a file `bundle.js`, we would embed a version identifier or a hash of its content into the filename, like `bundle-v2.js` or `bundle-5d4140.js`.
+
+3.  **Atomic Updates:** When we deploy a new version of the website, the main `index.html` file will be updated to reference these new, versioned URLs for the JavaScript and CSS files. When a user requests the site, they get the new HTML, which in turn causes their browser to fetch the new assets. Because the old assets had different URLs, there is no risk of the browser mixing old and new versions, which allows for safe, atomic updates.
+
+This strategy combines the best of both worlds: extremely aggressive and long-term caching for performance, and a simple, safe mechanism for rolling out updates.
+
+---
+
+## Question 3: Server-Side Caching with a Reverse Proxy
+
+**Scenario:** You have successfully implemented client-side HTTP caching for your application's API. This has greatly improved performance for individual repeat users. However, your origin servers are still under heavy load because a large number of *different* users are all requesting the same popular, cachable resources.
+
+**Question:** How can you introduce **server-side caching** to further reduce the load on your origin servers? Describe the role of a **reverse proxy** in this architecture and explain why a shared, server-side cache is often more effective at reducing overall server load than individual client-side caches.
+
+### Solution
+
+To solve the problem of many unique users hitting the same resources, we can introduce a **server-side cache**, which is most commonly implemented using a **reverse proxy**.
+
+#### The Role of a Reverse Proxy
+
+A reverse proxy is a server that acts as an **intermediary** between clients and the origin server(s). It intercepts all incoming communications, and from the client's perspective, it is indistinguishable from the actual origin server.
+
+
+#### Why a Reverse Proxy Cache is So Effective
+
+The key benefit is that a reverse proxy cache is **shared among all clients**.
+
+* When the first user requests a cachable resource (e.g., `/api/popular-products`), the reverse proxy fetches it from the origin server and stores a copy locally before returning it to the user.
+* When a *different* user requests that same resource, the reverse proxy can now serve the response directly from its shared cache, without ever needing to contact the origin server.
+
+This is far more effective at reducing overall server load than client-side caching alone. While a hundred different client-side caches would each result in one request to the origin, a single shared reverse proxy cache results in **only one** total request to the origin for that resource. The other 99 requests are handled by the proxy.
+
+#### Other Functions of a Reverse Proxy
+
+Because a reverse proxy is a middleman, it's a powerful place to implement other functionalities beyond caching, such as:
+* **Load-balancing** requests across multiple origin servers.
+* **Rate-limiting** traffic from specific clients.
+* **Compressing** responses to speed up transmission.
+* **Authenticating** requests on behalf of the server.
+
+In modern infrastructure, instead of self-hosting a reverse proxy like NGINX, these functionalities are often provided by a managed **Content Delivery Network (CDN)**.
