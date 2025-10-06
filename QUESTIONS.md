@@ -1263,3 +1263,97 @@ The update rules are as follows:
 * **Stronger Guarantee:** Vector clocks provide a much stronger guarantee. An event A **happened-before** event B **if and only if** the vector timestamp of A is less than the vector timestamp of B. Crucially, if neither timestamp is less than the other, the events can be identified as **concurrent**. This allows a system like a key-value store to detect a write conflict and ask the client to resolve it.
 
 * **Primary Drawback:** The main problem with vector clocks is that their **storage requirement grows linearly with the number of processes** in the system. For a system with thousands or millions of clients, each tracking its own vector, the size of the clock vector that needs to be stored and transmitted with every message can become prohibitively large.
+
+
+# System Design Interview Questions: Leader Election
+
+Here are several interview questions and answers based on the provided chapter, focusing on the concepts and practical implementations of leader election in large-scale distributed systems.
+
+---
+
+## Question 1: The "Split Vote" Problem in Raft
+
+**Scenario:** You are explaining the Raft leader election algorithm during an interview. The interviewer asks, "What happens if two follower processes time out at almost the exact same time and both become candidates for the same new term? How does the algorithm prevent the system from getting stuck in an endless cycle of failed elections?"
+
+### Solution
+
+This scenario describes a **split vote**, which is a well-known possibility in the Raft algorithm.
+
+#### What Happens in a Split Vote
+
+1.  Two followers time out and start a new election for the same term (e.g., term 5).
+2.  Both transition to the **Candidate** state and vote for themselves.
+3.  They then send vote requests to all other processes in the system.
+4.  Because each process can only vote for **one candidate per term** on a first-come-first-served basis, the votes may be split evenly between the two candidates.
+5.  As a result, it's possible that **neither candidate obtains a majority** of the votes.
+
+Without a mechanism to handle this, the candidates would time out again, start another election for a new term, and potentially split the vote again, leading to a system that cannot elect a leader and therefore cannot make progress (a violation of the **liveness** guarantee).
+
+#### The Solution: Randomized Timeouts
+
+Raft solves the split vote problem with a simple and elegant solution: **randomized election timeouts**.
+
+* Instead of having a fixed timeout, each process chooses its election timeout **randomly from a fixed interval**.
+* This makes it highly unlikely that multiple processes will time out at the exact same moment. One process will almost certainly time out, become a candidate, and request votes before any others.
+* Even if a split vote does occur, the candidates will choose new, random timeouts for the next election round, making it highly probable that one will win the next election before the other can even start it. This effectively breaks the symmetry and ensures an election eventually completes.
+
+---
+
+## Question 2: The "Split-Brain" Problem with Leases
+
+**Scenario:** Your team needs to implement leader election and decides against building Raft from scratch. Instead, you opt for a more common approach using a fault-tolerant key-value store like ZooKeeper or etcd. The proposed design is simple: processes compete to acquire a "lease" (a key with a TTL). The process holding the lease is the leader.
+
+**Question:** Why is this simple lease-based approach insufficient to guarantee the safety property of "at most one leader"? Describe a specific scenario where this could lead to two processes acting as the leader simultaneously, and explain the concept of **fencing** to solve this problem.
+
+### Solution
+
+While using a lease is a common and practical way to implement leader election, a lease by itself **does not guarantee safety**. It is vulnerable to a dangerous race condition, often called a "split-brain" scenario, where two processes believe they are the leader at the same time.
+
+#### The Race Condition Scenario
+
+Here's how the failure can occur:
+
+1.  **Process A** acquires the leader lease in the key-value store.
+2.  Process A begins some work, but before it completes, its process is **paused by the operating system** for a long time (e.g., due to a long garbage collection pause).
+3.  While Process A is paused, its lease in the key-value store **expires**.
+4.  **Process B**, seeing the expired lease, successfully acquires a new lease and becomes the new leader.
+5.  Process B starts performing work on a shared resource.
+6.  Finally, **Process A unpauses**. It is completely unaware that its lease expired and that a new leader exists. It continues its original work and attempts to modify the shared resource, now conflicting with the legitimate leader, Process B.
+
+This violates the safety guarantee of having at most one leader.
+
+#### The Solution: Fencing
+
+To solve this problem, we must use a technique called **fencing**. Fencing ensures that an old, out-of-date leader is "fenced off" and prevented from modifying shared resources.
+
+* **How it works:** We associate the shared resource with a **version number** that is atomically incremented every time the resource is updated. The leader election mechanism must also provide this version number (or a similar monotonically increasing token) along with the lease.
+* When a process believes it's the leader, it first reads the resource *and* its current version number.
+* After doing its work, it attempts to write back to the resource **conditionally**, using a **compare-and-swap (CAS)** operation. The write is only allowed if the resource's version number has not changed since it was first read.
+
+In our scenario, when the old leader (Process A) finally wakes up and tries to write to the resource, its CAS operation will fail because the new leader (Process B) will have already modified the resource and incremented the version number. Process A's write is safely rejected, and the race condition is prevented.
+
+---
+
+## Question 3: Downsides and Mitigation of a Single Leader
+
+**Scenario:** You have successfully designed and implemented a system that relies on a single, highly available leader to coordinate all critical operations. As the system's usage grows over time, you begin to observe performance degradation during peak load, and any failure of the leader causes a significant, system-wide outage.
+
+**Question:** What are the two main downsides of a single-leader architecture in a large-scale system? Describe a common architectural pattern that is used to mitigate these downsides.
+
+### Solution
+
+While a single leader simplifies the design of many distributed algorithms, it introduces two significant downsides that become apparent at scale:
+
+1.  **Scalability Bottleneck:** By definition, a single leader must handle all the coordination work for the entire system. As the number of clients and operations grows, the leader can become overwhelmed with traffic, turning into a performance bottleneck that limits the scalability of the whole system.
+2.  **Single Point of Failure:** Although the leader election process is designed to be fault-tolerant, the leader itself is still a single point of failure at any given moment. If the leader fails, the system cannot make progress until a new leader is elected. If the election process itself is slow or broken, this can lead to a prolonged, system-wide outage.
+
+#### Mitigation: Partitions with Multiple Leaders
+
+A common and effective pattern to mitigate these downsides is to introduce **partitions** (also known as sharding).
+
+* **How it works:** Instead of having one leader for the entire system, the system's data or workload is divided into multiple independent partitions. A separate and independent leader election is then run for **each partition**.
+* **Benefits:**
+    * **Improved Scalability:** The coordination work is now distributed among multiple leaders, so a single leader is no longer a bottleneck. The system can scale by adding more partitions.
+    * **Improved Availability:** The failure of a leader for one partition only affects that specific partition. The leaders for all other partitions can continue to operate normally, containing the "blast radius" of the failure and preventing a total system outage.
+
+This pattern is very common in distributed data stores, where each partition of the data has its own designated leader.
