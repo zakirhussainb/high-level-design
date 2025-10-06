@@ -2017,3 +2017,99 @@ One common strategy mentioned in the text is to **split the key into sub-keys**.
 
 * **How it works:** Instead of having a single key `celebrity_user_id`, we can add a random prefix or suffix to it. For example, when a read request for the celebrity comes in, we can prepend a random number from 1 to 10 to the key, such as `5-celebrity_user_id`.
 * **The Result:** The read requests for this single user are now spread across 10 different keys, which will be hashed to 10 different partitions. This effectively distributes the load for the single hot user across multiple nodes. The trade-off is that this adds complexity, as writes to this user's data would now have to be written to all 10 sub-keys to ensure reads get the latest data.
+
+
+# System Design Interview Questions: Distributed File Storage
+
+Here are several interview questions and answers based on the provided chapter, focusing on the architecture of a large-scale, distributed file store like Azure Storage.
+
+---
+
+## Question 1: Tracing a File Upload Request
+
+**Scenario:** A client application needs to upload a new file (e.g., an image) to a large-scale blob storage system like Azure Storage. The client constructs a unique URL containing a customer-chosen account name and a new file name.
+
+**Question:** Walk me through the entire lifecycle of this upload request, starting from the initial DNS lookup. Describe the roles of the global **Location Service** and the three layers within a storage cluster (**Front-End, Partition, and Stream**) in handling this request.
+
+### Solution
+
+The process of uploading a file involves a coordinated effort between a global control plane and the multiple layers of a specific storage cluster.
+
+
+#### 1. DNS Lookup and Cluster Identification
+* The client first performs a **DNS lookup** on the account name part of the URL (e.g., `myaccount.blob.core.windows.net`).
+* The system's DNS is managed by a global control plane called the **Location Service**. This service knows which storage cluster is responsible for which account.
+* The DNS lookup resolves to the public IP address of the correct **storage cluster**, directing the client's request to the right geographical location.
+
+#### 2. Front-End Layer: Ingestion and Routing
+* The client's request first hits the **Front-End Layer** of the storage cluster. This layer is a stateless reverse proxy.
+* It **authenticates** the request to ensure the client has permission to upload to this account.
+* It then consults the **Partition Manager** to determine which specific **Partition Server** is responsible for the file name being uploaded.
+* Finally, it routes the request to that correct partition server.
+
+#### 3. Partition Layer: Indexing and Metadata
+* The **Partition Server** receives the request. This layer is responsible for managing the high-level file system index.
+* It creates a new metadata entry for the file in its distributed index. This entry contains the account and file name.
+* It then communicates with the **Stream Layer** to store the actual file content. The partition layer translates the high-level "write file" operation into low-level "write to extents" operations.
+
+#### 4. Stream Layer: Physical Storage and Replication
+* The **Stream Layer** is the lowest level, acting as a distributed append-only file system.
+* It breaks the file data into fundamental units of replication called **extents**.
+* The **Stream Manager** (the stream layer's control plane) allocates a new extent for the data and assigns it to a chain of storage servers.
+* The data is then written to the head of this chain and **replicated synchronously** using **chain replication** to ensure durability.
+* Once the write is successfully replicated and acknowledged by the stream layer, the acknowledgement propagates back up through the partition and front-end layers to the client.
+
+This layered approach allows the system to handle requests at a massive scale, separating the concerns of global routing, request handling, logical indexing, and physical storage.
+
+---
+
+## Question 2: The Three-Layer Storage Cluster Architecture
+
+**Scenario:** An interviewer asks you to zoom in on the internal architecture of a single storage cluster within a system like Azure Storage. They want to understand how it's designed for scalability and manageability.
+
+**Question:** Describe the responsibilities of the three distinct layers that compose a storage cluster: the **Stream Layer**, the **Partition Layer**, and the **Front-End Layer**. Explain how this separation of concerns helps the system scale.
+
+### Solution
+
+A storage cluster in a system like Azure Storage is designed with a clear three-layer architecture, where each layer has a distinct responsibility. This separation of concerns is key to its scalability.
+
+#### 1. The Stream Layer (The "Distributed Disk")
+* **Responsibility:** This is the lowest level of the stack. Its job is to provide a simple, distributed, append-only file system. It knows nothing about files, accounts, or users. It only manages structures called **streams**, which are sequences of data blocks called **extents**. Its sole focus is on reliably storing and replicating these extents across many physical storage servers using **chain replication**.
+* **Scalability:** By abstracting away the physical storage, this layer can focus exclusively on durability and data distribution. Its control plane, the **Stream Manager**, can manage replica placement and handle disk or server failures without affecting the upper layers.
+
+#### 2. The Partition Layer (The "File System Index")
+* **Responsibility:** This middle layer acts as the brain of the cluster. It translates high-level file concepts into the low-level stream concepts. It maintains a massive, distributed index that maps a file (identified by account and file name) to its actual data stored as extents in the Stream Layer.
+* **Scalability:** Its control plane, the **Partition Manager**, is responsible for **range-partitioning** this massive index across many **Partition Servers**. This is how it scales the metadata operations. The Partition Manager also performs dynamic load balancing by splitting partitions that become too "hot" (frequently accessed) and merging "cold" ones, ensuring that the load is evenly distributed.
+
+#### 3. The Front-End Layer (The "Gateway")
+* **Responsibility:** This is a thin, stateless layer of reverse proxies that serves as the public face of the cluster. Its jobs are to authenticate incoming requests and act as a smart router, directing each request to the correct Partition Server that holds the index for that particular file.
+* **Scalability:** Because this layer is stateless, it can be scaled out horizontally with ease. We can add or remove front-end nodes as needed to handle the incoming request load without affecting the stateful layers below.
+
+This layered design allows each part of the system to be scaled and managed independently, which is essential for operating a massive, multi-tenant storage service.
+
+---
+
+## Question 3: Data Replication and Consistency in the Stream Layer
+
+**Scenario:** You are designing the lowest level of a large-scale storage system—the **Stream Layer**. The primary requirements for this layer are to provide strong durability (no data loss) and strong consistency for all write operations.
+
+**Question:** What is the fundamental unit of replication in this layer? What specific replication protocol does the Azure Storage design use to achieve synchronous replication? Finally, how did this focus on strong consistency from the very beginning historically differentiate a service like Azure Storage from its main competitor, AWS S3?
+
+### Solution
+
+In the Stream Layer, which functions as the distributed append-only file system, the fundamental unit of replication is the **extent**. A file is broken down into a sequence of these extents for storage.
+
+#### Replication Protocol: Chain Replication
+To achieve strong durability and consistency, the Azure Storage design uses **chain replication** for the synchronous replication of these extents.
+
+* **How it works:** When a new extent needs to be stored, the **Stream Manager** (the control plane) assigns it to a specific linear chain of storage servers.
+* A write operation is always sent to the first server in the chain (the "head").
+* The write then propagates sequentially through each server in the chain until it reaches the last server (the "tail").
+* A write is only considered complete and acknowledged back to the client (the Partition Layer) once it has been successfully written by every server in the chain. This ensures the data is durably stored on multiple physical nodes before the write is confirmed.
+
+
+#### Historical Note on Consistency
+
+This decision to build the system with **strong consistency** from its inception was a significant architectural choice. It meant that once a write was acknowledged, all subsequent reads were guaranteed to see that new data.
+
+This differentiated it from its main competitor at the time, **AWS S3**. Historically, AWS S3 initially offered **eventual consistency** for some operations (specifically, overwrites and deletes). This meant that for a short period after an update, a read operation was not guaranteed to return the newest version of the data. While S3 has since evolved and now provides strong read-after-write consistency (as of 2021), this initial design difference highlights a fundamental trade-off in distributed systems between strong consistency and other factors like latency and availability.
