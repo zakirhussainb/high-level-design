@@ -2322,3 +2322,105 @@ With this model, our primary access pattern becomes a single, highly efficient q
 * "Query for all items where the **partition key** is `jonsnow`."
 
 Because all of `jonsnow`'s items are in the same partition and are physically sorted by the sort key, DynamoDB can retrieve the customer's profile and all of their orders (which will be naturally sorted by date) in one fast operation. This design completely avoids the need for expensive, non-scalable joins by modeling the data around the way it will be read.
+
+
+# System Design Interview Questions: Caching
+
+Here are several interview questions and answers based on the provided chapter, focusing on caching strategies, policies, and architectures in large-scale systems.
+
+---
+
+## Question 1: Local vs. External Caching Architectures
+
+**Scenario:** You are designing a caching layer for a high-traffic web application to reduce read load on your main database. You have scaled your stateless application servers horizontally. You are now considering two primary caching architectures: a **local (in-process) cache** on each application server, or a shared, **external (out-of-process) cache** like Redis.
+
+**Question:** Compare and contrast these two architectures. What are the main drawbacks of a local cache in a scaled-out environment? What is the **"Thundering Herd" effect**, and how does an external cache help mitigate it?
+
+### Solution
+
+The choice between a local and an external cache involves significant trade-offs in performance, consistency, and resource management.
+
+#### Local (In-Process) Cache
+* **Architecture:** The cache is co-located with the client, running within the same application process (e.g., as an in-memory hash table).
+* **Pros:** Extremely fast access, as no network call is required.
+* **Drawbacks in a Scaled-Out Environment:**
+    * **Resource Waste:** The same popular objects are duplicated across every single client's cache. If you have 100 servers each with a 1GB cache, the total amount of unique cached data is still at most 1GB.
+    * **Consistency Issues:** Since each cache is independent, different clients can hold different, potentially stale versions of the same object.
+    * **Increased Origin Load:** As the number of clients (application servers) grows, the number of cache misses that hit the origin database increases proportionally.
+
+
+#### External (Out-of-Process) Cache
+* **Architecture:** The cache is a separate, dedicated service (like Redis or Memcached) that is shared by all clients.
+* **Pros:** It solves many of the problems of local caches.
+* **Drawbacks:** Requires a network call (higher latency than local cache) and is another service to maintain.
+
+
+#### The Thundering Herd Effect and Mitigation
+
+The **Thundering Herd** effect is a major problem with local caches. It occurs when many clients need to populate their caches at the same time, for example:
+* When a fleet of servers is restarted, and their empty caches all need to be warmed up.
+* When a previously unpopular object suddenly becomes popular, and every client simultaneously experiences a cache miss for it.
+
+In both cases, this leads to a massive, simultaneous surge of requests from all clients to the origin data store, which can easily overwhelm and crash it.
+
+An **external cache** helps mitigate this because it is shared. Only the *first* client to experience a miss for a popular object will request it from the origin. All subsequent clients requesting that same object will get a cache hit from the shared external cache, protecting the origin from the "herd."
+
+---
+
+## Question 2: Cache Miss Handling Policies
+
+**Scenario:** You've decided to implement a caching layer between your application and your database. Now you need to decide on the policy for how the application should interact with the cache, specifically when a cache miss occurs.
+
+**Question:** Describe the two main policies for handling cache misses: the **Side Cache (or Cache-Aside)** pattern and the **Inline Cache (or Read-Through)** pattern. What is the key difference between them in terms of which component is responsible for communicating with the origin data store?
+
+### Solution
+
+The two main patterns for handling cache misses define where the responsibility lies for fetching data from the origin.
+
+#### 1. Side Cache (Cache-Aside)
+* **Responsibility:** In this pattern, the **application code** is explicitly responsible for managing the cache.
+* **Workflow:**
+    1.  The application first requests an object from the cache.
+    2.  If the cache returns a miss (the object is not found), it is the **application's job** to then request the object directly from the origin data store (the database).
+    3.  After retrieving the object from the origin, the application updates the cache with this new object so it's available for future requests.
+* **Key Characteristic:** The application code "knows" about both the cache and the database and orchestrates the interaction between them. The cache is treated as a simple key-value store.
+
+#### 2. Inline Cache (Read-Through)
+* **Responsibility:** In this pattern, the **cache itself** is responsible for fetching data from the origin.
+* **Workflow:**
+    1.  The application requests an object from the cache.
+    2.  If the cache has the object, it returns it.
+    3.  If the cache has a miss, it is the **cache's job** to request the missing object from the origin on behalf of the application. Once retrieved, the cache stores it and returns it to the application.
+* **Key Characteristic:** The application is completely abstracted away from the origin. It only ever communicates with the cache. The standard HTTP caching mechanism is a good example of an inline cache.
+
+The key difference is who talks to the origin on a cache miss: in **Cache-Aside**, it's the **application**; in **Read-Through**, it's the **cache**.
+
+---
+
+## Question 3: The Danger of Cache Unavailability
+
+**Scenario:** You have successfully deployed a large, external Redis cache that is handling 95% of the read requests for your application. This has dramatically reduced the load on your origin database, allowing you to run it on smaller, more cost-effective hardware. One day, the entire Redis cluster goes down. Within minutes, your database also crashes, causing a full-site outage.
+
+**Question:** Explain why the unavailability of the cache can lead to a **cascading failure** that takes down the origin data store. What is the fundamental design principle regarding caching that was violated here? What are two defense strategies that could have been used to prevent this outage?
+
+### Solution
+
+This scenario highlights the most dangerous aspect of implementing a cache: while it's an optimization, it can inadvertently become a critical component that the system's stability depends on.
+
+#### The Cascading Failure Explained
+
+The cascading failure occurs because the origin database was not provisioned to handle the full load of the application.
+1.  **Cache Goes Down:** The external Redis cache becomes unavailable.
+2.  **Traffic Surge:** All application servers, which previously enjoyed a 95% cache hit ratio, now experience a 100% miss rate.
+3.  **Origin Overwhelmed:** All of the traffic that was being absorbed by the cache is now suddenly and immediately directed to the origin database.
+4.  **Origin Crash:** The database, which was provisioned to handle only 5% of the total traffic, is completely overwhelmed by the surge and crashes. The entire application is now down.
+
+The fundamental design principle that was violated is: **caching is an optimization, and the system must be able to survive without it**. The application became slower, which is acceptable, but it fell over, which is not.
+
+#### Defense Strategies
+
+To prevent this, we need to build defenses on both the client (application) and server (origin) sides.
+
+1.  **Origin-Side Defense (Load Shedding):** The origin system (the database or a service in front of it) must be prepared to handle sudden traffic surges. It should implement **load shedding**, where it proactively rejects excess requests once it reaches capacity. This is a form of graceful degradation. It's better for the origin to serve a fraction of requests correctly than to crash while trying to serve them all.
+
+2.  **Client-Side Defense (Multi-Layer Caching):** The clients could use a **local, in-process cache** as a fallback or second layer of defense. If the external cache is unavailable, the application can try to serve the request from its own smaller, in-memory cache. While this won't have the same hit ratio as the large external cache, it can help absorb some of the shock and reduce the load spike on the origin during the external cache's outage.
