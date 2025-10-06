@@ -2206,3 +2206,119 @@ From the application's perspective, it thinks it's just talking to `localhost`, 
 #### Disadvantages
 
 * **Increased Complexity:** The primary disadvantage is a significant increase in operational complexity. While you've removed the dedicated load balancer tier, you now have hundreds or thousands of sidecar proxies to manage. This necessitates a sophisticated **control plane** to configure, update, and manage the entire fleet of sidecars, which is a complex system in itself.
+
+
+# System Design Interview Questions: Data Storage and Scaling
+
+Here are several interview questions and answers based on the provided chapter, focusing on the evolution of database scaling strategies from simple replication to modern NoSQL and NewSQL architectures.
+
+---
+
+## Question 1: Scaling a Relational Database for Reads
+
+**Scenario:** You have a web application backed by a single relational database server. The application is becoming very popular, and while write performance is still acceptable, the database is struggling to keep up with the high volume of read requests from users.
+
+**Question:** Describe the **leader-follower replication** pattern to scale the read capacity of this database. Explain the roles of the leader and followers. Compare the three replication modes: **fully asynchronous, fully synchronous, and semi-synchronous**, and state which one you would choose to improve availability with no data loss.
+
+### Solution
+
+When a database becomes a bottleneck for reads, the standard solution is to introduce **leader-follower replication**.
+
+#### Leader-Follower Architecture
+
+* **The Leader:** All write operations (inserts, updates, deletes) are sent exclusively to a single primary database, the **leader**. It records these changes in its write-ahead log (WAL).
+* **The Followers (Replicas):** One or more **follower** databases connect to the leader and stream the changes from its WAL. They then apply these changes to their own local copy of the data.
+* **Scaling Reads:** Read-only queries can be distributed across the pool of follower replicas (often with a load balancer in front), which dramatically increases the system's overall read capacity.
+
+
+#### Comparison of Replication Modes
+
+The key trade-off in replication is between performance and data consistency, which is controlled by the replication mode:
+
+1.  **Fully Asynchronous:** The leader sends an acknowledgement back to the client as soon as it processes a write, *without* waiting to hear back from any followers.
+    * **Pro:** Very fast, as it minimizes client response time.
+    * **Con:** **Risks data loss.** If the leader crashes after acknowledging a write but before the followers have received it, that write is lost forever.
+
+2.  **Fully Synchronous:** The leader waits for an acknowledgement from **all followers** before sending a response back to the client.
+    * **Pro:** Provides strong data consistency and prevents data loss.
+    * **Con:** Very slow and brittle. A single slow or unavailable follower will increase the latency of *every* write and can even make the entire database unavailable for writes.
+
+3.  **Semi-Synchronous (Combined):** This is a practical compromise. The leader is configured to wait for an acknowledgement from at least **one** specific, designated synchronous follower before responding to the client. The other followers can remain asynchronous.
+    * **Pro:** This configuration provides a guarantee of **no data loss** on failover. If the primary leader fails, we can confidently promote the synchronous follower to be the new leader, knowing it is fully up-to-date.
+    * **Con:** It is slightly slower than fully asynchronous replication.
+
+For the goal of improving availability with no data loss, **semi-synchronous replication** is the best choice. It provides the durability guarantee of synchronous replication without the severe performance and availability penalties of waiting for all followers.
+
+---
+
+## Question 2: The Shift from Relational to NoSQL Databases
+
+**Scenario:** Your application's data volume has now grown so large that it no longer fits on a single machine, and write throughput has also become a bottleneck. Simple leader-follower replication is no longer a sufficient solution because it doesn't scale writes or handle datasets larger than a single machine. You are considering migrating from a traditional relational database (RDBMS) to a NoSQL database.
+
+**Question:** What are the key architectural differences between a traditional RDBMS and a NoSQL database in terms of data model, support for joins, and consistency? What is the single most important requirement for using a NoSQL database effectively?
+
+### Solution
+
+The move from a traditional RDBMS to a NoSQL database represents a fundamental shift in design philosophy, trading some traditional guarantees for massive scalability and high availability.
+
+#### Key Architectural Differences
+
+* **Data Model and Joins:**
+    * **RDBMS:** Designed when storage was expensive, they use a **normalized** data model (breaking data into separate tables to reduce duplication). This requires expensive **join** operations at query time to reconstruct the data.
+    * **NoSQL:** Designed when storage is cheap, they use a **denormalized** data model, often representing data as key-value pairs or rich documents (like JSON). They generally **do not support join operations**, as these are very difficult to perform at scale in a distributed system.
+
+* **Consistency Models:**
+    * **RDBMS:** Typically provide very strong consistency guarantees, such as **strict serializability** (ACID transactions).
+    * **NoSQL:** Often embrace **relaxed consistency models** like eventual consistency or causal consistency. This allows them to prioritize availability, especially during network partitions, a trade-off explained by the CAP theorem.
+
+* **Transactions:**
+    * **RDBMS:** Provide strong support for ACID transactions across the entire dataset.
+    * **NoSQL:** Have limited transaction support, often scoped to operations within a **single partition**. The need for complex, multi-item transactions is reduced by the denormalized data model.
+
+#### The Core Requirement for Effective NoSQL Use
+
+The single most important requirement for using a NoSQL database effectively is to **know the application's access patterns upfront and model the data accordingly**.
+
+This is a common misconception. NoSQL is not more "flexible" in the sense that you can figure out your queries later. In fact, because NoSQL data models are so tightly coupled to the access patterns to avoid joins, they can be *less* flexible than relational databases if those patterns change in the future.
+
+---
+
+## Question 3: Data Modeling in DynamoDB
+
+**Scenario:** You are using Amazon DynamoDB, a popular NoSQL key-value store, to model customer and order information for an e-commerce application. By far the most common and performance-critical query is: "For a given customer, fetch their profile information and all of their orders, sorted by the order date."
+
+**Question:** Describe how you would model this one-to-many relationship (one customer, many orders) in a **single DynamoDB table** to optimize for this access pattern, completely avoiding the need for joins. Explain the roles of the **partition key** and the **sort key** in your design.
+
+### Solution
+
+This is a classic NoSQL data modeling problem that involves denormalization and structuring the table based on the primary access pattern. We can efficiently model this in a single DynamoDB table by strategically using the primary key.
+
+A DynamoDB primary key consists of two parts: a **partition key** and an optional **sort key**.
+* **Partition Key:** This key determines how data is distributed (partitioned) across nodes. All items with the same partition key are stored together.
+* **Sort Key:** This key determines the order in which items are stored within a single partition. This enables efficient range queries.
+
+#### The Single-Table Design
+
+To satisfy the requirement, we will store both customer entities and order entities in the same table and make them share the same partition key.
+
+1.  **Choose the Partition Key:** The **`CustomerID`** (e.g., `jonsnow`) will be our partition key for both customer and order items. This ensures that a customer's profile and all of their orders are co-located in the same partition.
+
+2.  **Choose the Sort Key:** We will use the sort key to differentiate between the item types and to provide the required sorting for orders.
+    * For an **Order** item, the sort key will be the **`OrderDate`** (e.g., `2021-07-13`).
+    * For a **Customer** item, the sort key will be the **`CustomerID`** itself (or another static value like `PROFILE`).
+
+Here's how the table would look:
+
+| Partition Key (CustomerID) | Sort Key (OrderDate or CustomerID) | Attribute (e.g., OrderID) | Attribute (e.g., FullName) |
+| -------------------------- | ---------------------------------- | --------------------------- | ---------------------------- |
+| `jonsnow`                  | `2021-07-13`                       | `1452`                      |                              |
+| `jonsnow`                  | `jonsnow`                          |                             | `Jon Snow`                   |
+| `aryastark`                | `2021-07-20`                       | `5252`                      |                              |
+| `aryastark`                | `aryastark`                        |                             | `Arya Stark`                 |
+
+#### Executing the Query
+
+With this model, our primary access pattern becomes a single, highly efficient query:
+* "Query for all items where the **partition key** is `jonsnow`."
+
+Because all of `jonsnow`'s items are in the same partition and are physically sorted by the sort key, DynamoDB can retrieve the customer's profile and all of their orders (which will be naturally sorted by date) in one fast operation. This design completely avoids the need for expensive, non-scalable joins by modeling the data around the way it will be read.
