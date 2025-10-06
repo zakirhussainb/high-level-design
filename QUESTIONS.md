@@ -1357,3 +1357,107 @@ A common and effective pattern to mitigate these downsides is to introduce **par
     * **Improved Availability:** The failure of a leader for one partition only affects that specific partition. The leaders for all other partitions can continue to operate normally, containing the "blast radius" of the failure and preventing a total system outage.
 
 This pattern is very common in distributed data stores, where each partition of the data has its own designated leader.
+
+
+# System Design Interview Questions: Replication
+
+Here are several interview questions and answers based on the provided chapter, focusing on the concepts of data replication, consistency, and fault tolerance in large-scale systems.
+
+---
+
+## Question 1: The Raft Commit Process
+
+**Scenario:** You are designing a fault-tolerant key-value store using the Raft consensus protocol. A client sends a `SET x = 5` command to the cluster's leader.
+
+**Question:** Walk me through the five steps of Raft's two-phase commit process, from the moment the leader receives the command to when the change is safely applied across the cluster. At what specific point is the new value considered "committed," and why is the concept of a "majority" so important?
+
+### Solution
+
+The Raft protocol ensures that all replicas (state machines) agree on the same sequence of operations by replicating a log. The process for committing a new command like `SET x = 5` involves five key steps:
+
+1.  **Logging on Leader:** The leader receives the command from the client. It appends the command as a new entry to its *own local log* but does **not** execute it or update its state yet.
+
+2.  **Replication to Followers:** The leader sends an `AppendEntries` request, containing the new log entry, to all of its followers in parallel.
+
+3.  **Majority Acknowledgement (Quorum):** The leader waits to receive a successful response from a **majority** of the follower nodes. This is the crucial step.
+
+4.  **Commitment on Leader:** Once the leader has heard back from a majority, it considers the log entry officially **committed**. It is now safe to apply the operation. The leader executes the `SET x = 5` command and updates its local state machine.
+
+5.  **Follower Application:** In subsequent messages (like heartbeats), the leader informs the followers which log entries have been committed. Only when a follower learns that an entry is committed does it apply the operation to its *own* local state machine.
+
+
+The concept of waiting for a **majority** is the key to Raft's fault tolerance. For a system with `2f + 1` nodes, it can tolerate up to `f` failures. By waiting for a majority, the system ensures that any committed entry is stored on at least `f + 1` nodes. This guarantees that even if `f` nodes fail, at least one node with that committed data will survive and be part of any new majority, ensuring that no committed data is ever lost.
+
+---
+
+## Question 2: Trade-offs in Consistency Models
+
+**Scenario:** Your team is designing a new replicated data store. The product manager wants the "best" and "strongest" consistency possible, but the engineering team is concerned about performance.
+
+**Question:** Compare and contrast three common consistency models: **Strong Consistency (Linearizability)**, **Sequential Consistency**, and **Eventual Consistency**. For each model, explain how it typically handles read/write requests and what guarantees it provides. Use the **PACELC theorem** to frame the inherent trade-off between consistency and performance.
+
+### Solution
+
+The "best" consistency model depends entirely on the application's requirements, as there are fundamental trade-offs between consistency, availability, and performance.
+
+#### Comparison of Consistency Models
+
+* **Strong Consistency (Linearizability):**
+    * **How it works:** All client requests, both **reads and writes**, are handled exclusively by a single leader.
+    * **Guarantee:** This is the strongest and most intuitive model. The system behaves as if there is only a single copy of the data. Once a write operation completes, its effects are guaranteed to be visible to all subsequent observers.
+    * **Trade-off:** It provides the best guarantees but suffers from the highest latency.
+
+* **Sequential Consistency:**
+    * **How it works:** Writes are sent to the leader, but **reads can be served by any follower**.
+    * **Guarantee:** All observers will see the operations happen in the same order. However, there is no real-time guarantee; a client might read slightly stale data from a follower that is lagging behind the leader.
+    * **Trade-off:** It improves read performance significantly but weakens the real-time guarantee.
+
+* **Eventual Consistency:**
+    * **How it works:** Reads can be served by any follower.
+    * **Guarantee:** This is the most relaxed model. It only guarantees that if no new writes are made, all replicas will *eventually* converge to the same state. A client could read a new value from one replica and then read an older value from another.
+    * **Trade-off:** It offers the highest availability and read scalability but is the most difficult for developers to reason about. It is only suitable for applications where stale data is acceptable (e.g., social media "likes").
+
+#### The PACELC Theorem
+
+The **PACELC theorem** perfectly explains the trade-offs at play. It states that for a distributed system:
+* In case of a **P**artition, one must choose between **A**vailability and **C**onsistency.
+* **E**lse (during normal operation), one must choose between **L**atency and **C**onsistency.
+
+This "Else" part is key here. It highlights the direct relationship between consistency and performance. Stronger consistency requires more coordination between replicas (e.g., the leader confirming its status before serving a read), which inherently increases **latency**. Relaxing consistency allows replicas to act more independently, which reduces latency and improves performance.
+
+---
+
+## Question 3: Chain Replication vs. Raft
+
+**Scenario:** You are choosing a replication protocol for a new system that requires strong consistency. However, you anticipate that the workload will be very read-heavy. The two main contenders are a standard leader-based protocol like Raft and an alternative called **Chain Replication**.
+
+**Question:** Describe the architecture of Chain Replication, including the roles of the "head" and the "tail." How do its data paths for reads and writes differ from a protocol like Raft, and what are the key performance trade-offs?
+
+### Solution
+
+Chain Replication is an alternative protocol that also provides strong consistency but uses a different architecture designed to optimize for certain workloads.
+
+#### Chain Replication Architecture
+
+Instead of a single leader and multiple followers, processes are arranged in a **linear chain**.
+* **The Head:** The first node in the chain. It is the *only* node that accepts **write** requests.
+* **The Tail:** The last node in the chain. It is the *only* node that serves **read** requests.
+* **Failure Handling:** A separate, fault-tolerant control plane (which might itself use Raft) is responsible for monitoring the chain's health and reconfiguring it if a node fails.
+
+
+#### Data Paths and Performance Trade-offs
+
+The data flow in Chain Replication is very different from Raft, leading to distinct performance characteristics.
+
+* **Write Path:**
+    * A client sends a write to the **head**.
+    * The head processes it and forwards the update to the next node in the chain.
+    * The update propagates sequentially down the entire chain. A write is only considered committed when it reaches the **tail**.
+    * **Trade-off:** This results in **higher write latency** compared to Raft, as the request must traverse every node. A single slow node in the chain will slow down *all* writes.
+
+* **Read Path:**
+    * A client sends a read request to the **tail**.
+    * Since a write is only committed once it reaches the tail, the tail always has the latest committed state. It can serve the read from its local data **immediately**, without needing to coordinate with any other nodes.
+    * **Trade-off:** This results in **lower read latency and higher read throughput** compared to strongly consistent reads in Raft (which require the leader to contact a majority).
+
+For a read-heavy workload requiring strong consistency, Chain Replication can be a superior choice due to its highly optimized read path.
