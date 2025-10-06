@@ -1177,3 +1177,89 @@ Both pings and heartbeats are proactive monitoring mechanisms, but they differ i
 For a central cluster manager monitoring a critical primary node, the **ping** mechanism is generally more appropriate.
 
 The responsibility for detecting the failure lies with the cluster manager, so it makes more logical sense for the manager to be the one actively probing the primary node's health. This is a direct and explicit check. A heartbeat relies on the primary node to be healthy enough to send the heartbeat, and a failure to receive a heartbeat is an implicit signal of a problem. A ping is an explicit test of reachability and responsiveness initiated by the component that needs to take action.
+
+
+# System Design Interview Questions: Time in Distributed Systems
+
+Here are interview questions and answers based on the provided chapter, focusing on the challenges of ordering events in large-scale distributed systems.
+
+---
+
+## Question 1: The Problem with Physical Clocks
+
+**Scenario:** You are debugging an issue in a distributed system where you see an operation logged on Server B with a timestamp of `10:00:01.500`, which appears to have occurred *before* a causally related operation on Server A with a timestamp of `10:00:01.600`. However, the application logic dictates that the event on Server A *must* have happened first to cause the event on Server B.
+
+**Question:** Why can you not rely on physical wall-time clocks for reliably ordering events across different nodes in a distributed system? Explain the concepts of **clock drift** and **clock skew**, and how the synchronization process itself can cause ordering paradoxes.
+
+### Solution
+
+This scenario highlights the core reason we cannot trust physical clocks for event ordering in a distributed system: there is **no shared global clock** that all processes agree on. Physical clocks on different machines are independent and imperfect.
+
+#### Key Problems with Physical Clocks
+
+1.  **Clock Drift and Skew:**
+    * The most common physical clocks are based on quartz crystals, which are cheap but not very accurate.
+    * Due to tiny manufacturing differences and environmental factors like temperature, these clocks run at slightly different rates. This phenomenon is called **clock drift**.
+    * Over time, this drift causes the clocks on different machines to fall out of sync. The difference between any two clocks at a specific point in time is called **clock skew**. This skew is the reason the timestamps in the scenario are misleading; Server B's clock might simply be running slightly ahead of Server A's.
+
+2.  **Synchronization Issues:**
+    * To combat drift, machines periodically synchronize their clocks with a more accurate time source using a protocol like the **Network Time Protocol (NTP)**.
+    * However, the synchronization process itself is a major source of problems. When a machine's clock is corrected by NTP, it can suddenly **jump forward or backward in time**.
+    * This can lead to the paradox where an operation that runs *after* another in real time gets an *earlier* timestamp, making physical timestamps completely unreliable for determining the causal order of events across different machines.
+
+This unreliability is precisely why we need to use logical clocks to reason about causality.
+
+---
+
+## Question 2: Lamport Clocks for Causal Ordering
+
+**Scenario:** You are building a distributed messaging system. A key requirement is to be able to determine the causal "happened-before" relationship between events. For example, if a user sends Message A and then another user sends Message B in reply to A, you need a way to ensure that the timestamp of A is always less than the timestamp of B.
+
+**Question:** Describe how a **Lamport clock** works. Explain its simple rules for updating its counter. What is the key guarantee it provides regarding the "happened-before" relationship, and what is its main limitation?
+
+### Solution
+
+A Lamport clock is a simple type of **logical clock** that captures the "happened-before" relationship without relying on wall-clock time. It's implemented as a single counter in each process.
+
+#### How a Lamport Clock Works
+
+The clock follows three simple rules:
+
+1.  A process increments its local counter by 1 before executing any local operation.
+2.  When a process sends a message, it first increments its counter and then includes the counter's value in the message.
+3.  When a process receives a message, it updates its local counter by taking the **maximum** of its own counter and the counter received in the message, and then increments its local counter by 1.
+
+
+#### Guarantee and Limitation
+
+* **Key Guarantee:** The Lamport clock provides a crucial guarantee: if operation A **happened-before** operation B, then the logical timestamp of A will be **less than** the logical timestamp of B. This perfectly solves the requirement for our messaging system.
+
+* **Main Limitation:** The reverse is **not true**. If a timestamp is smaller than another, it does **not** imply a causal relationship. Two events can have ordered timestamps simply by chance, without one having any effect on the other. Furthermore, two completely unrelated operations on different processes can end up with the same logical timestamp.
+
+---
+
+## Question 3: Vector Clocks for Detecting Concurrency
+
+**Scenario:** You are designing a distributed key-value store, similar to Amazon's DynamoDB, that prioritizes availability. This means it allows for concurrent writes to the same key, which can lead to data conflicts. You need a mechanism to definitively know when two versions of an object are concurrent (i.e., a write conflict) versus when one is a direct descendant of the other. A Lamport clock is insufficient for this task.
+
+**Question:** Explain why a Lamport clock cannot reliably detect concurrent events. Then, describe how a **vector clock** solves this problem, what stronger guarantee it provides, and its primary drawback in a large-scale system.
+
+### Solution
+
+A Lamport clock is insufficient because it cannot distinguish between events that are causally related and those that are not. If `timestamp(A) < timestamp(B)`, you don't know if A happened before B, or if they are unrelated concurrent events that just happened to get those timestamps.
+
+#### How Vector Clocks Work
+
+A **vector clock** is a more advanced logical clock that solves this problem. Instead of a single counter, each process maintains a **vector (or array) of counters**, with one entry for each process in the system.
+
+The update rules are as follows:
+* When a process has an internal event, it increments only **its own** counter in its vector.
+* When a process sends a message, it first increments its own counter and then sends a copy of its **entire vector**.
+* When a process receives a message, it merges the received vector with its local one by taking the **element-wise maximum** of the two vectors. It then increments its own counter in the newly merged vector.
+
+
+#### Stronger Guarantee and Drawback
+
+* **Stronger Guarantee:** Vector clocks provide a much stronger guarantee. An event A **happened-before** event B **if and only if** the vector timestamp of A is less than the vector timestamp of B. Crucially, if neither timestamp is less than the other, the events can be identified as **concurrent**. This allows a system like a key-value store to detect a write conflict and ask the client to resolve it.
+
+* **Primary Drawback:** The main problem with vector clocks is that their **storage requirement grows linearly with the number of processes** in the system. For a system with thousands or millions of clients, each tracking its own vector, the size of the clock vector that needs to be stored and transmitted with every message can become prohibitively large.
